@@ -38,7 +38,10 @@ test("bounded PDF worker preserves nested clauses, cross-page table rows and sou
   assert.equal(new Set(rows.map(unit => unit.table?.id)).size, 1);
   assert.deepEqual(rows[3].table?.cells.map(cell => cell.text), ["Transfers", "Keep twenty days"]);
   assert.equal(rows[3].table?.cells[1].box.page, 2);
-  assert.ok(rows[3].table!.cells[1].box.right > rows[3].table!.cells[1].box.left);
+  const box = rows[3].table!.cells[1].box;
+  assert.ok(Math.abs(box.left - 240 / 612) < 0.001);
+  assert.ok(Math.abs(box.right - 540 / 612) < 0.001);
+  assert.ok(Math.abs(box.top - (792 - 721) / 792) < 0.001);
 });
 
 test("scan without a text layer is flagged", async () => {

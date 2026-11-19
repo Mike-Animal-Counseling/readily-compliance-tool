@@ -43,11 +43,14 @@ export function createClient(endpoint: string, token: string) {
   const origin = new URL(endpoint);
   const localhost = ["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname);
   if ((origin.protocol !== "https:" && !(localhost && origin.protocol === "http:")) ||
-      origin.username || origin.password) throw new Error("Use an HTTPS API origin");
+      origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
+    throw new Error("Use a Readily HTTPS origin");
+  }
 
   async function request(path: string, method: "GET" | "POST" = "GET", body?: object | Uint8Array, idempotencyKey?: string) {
     const headers = new Headers({ Authorization: `Bearer ${token}` });
     const url = new URL(`/api/v1${path}`, origin);
+    if (!url.pathname.startsWith("/api/v1/")) throw new Error("Use a Readily v1 route");
     if (idempotencyKey) headers.set("Idempotency-Key", idempotencyKey);
     if (body) headers.set("Content-Type", body instanceof Uint8Array ? "application/pdf" : "application/json");
     const payload = body instanceof Uint8Array ? new Uint8Array(body) : body ? JSON.stringify(body) : undefined;

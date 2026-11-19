@@ -6,6 +6,7 @@ import { chunkPolicyDocument } from "../lib/rag/chunking";
 import { retrieveRelevantChunks } from "../lib/rag/retrieval";
 import { vectorizePolicyChunks } from "../lib/rag/vector-store";
 import type { ParentBlock } from "../lib/evidence/model";
+import { parsePolicy } from "../lib/evidence/layout";
 import { development, evidenceCorpus, holdout } from "./fixtures/evidence-corpus";
 
 export async function benchmark(client: ReturnType<typeof createClient>) {
@@ -18,9 +19,12 @@ export async function benchmark(client: ReturnType<typeof createClient>) {
     documentId: "corpus", pages, fileName: "benchmark.pdf", sourceType: "uploaded",
   }));
   const blocks = new Map<string, ParentBlock>();
+  const candidateTerms = new Map((await parsePolicy(pdf)).parents.map(block =>
+    [block.id, words(block.units.map(unit => unit.text).join(" "))]));
   for (const [name, cases] of [["development", development], ["holdout", holdout]] as const) {
     let baselineHits = 0, hits = 0, covered = 0, citations = 0, accurate = 0, supported = 0;
     let exceptionTotal = 0, exceptionsCovered = 0, conditionalHits = 0;
+    let reciprocalRank = 0, rerankedReciprocalRank = 0;
     const timings: number[] = [];
     for (const [index, item] of cases.entries()) {
       const started = performance.now();
@@ -30,7 +34,15 @@ export async function benchmark(client: ReturnType<typeof createClient>) {
       const retrieved = result.parents.filter(parent => parent.hits.length > 0);
       assert.ok(retrieved.length <= 5);
       const target = retrieved.find(parent => parent.documentVersionId === document.id && parent.parentId === item.parentId);
-      if (target) hits++;
+      if (target) {
+        hits++;
+        reciprocalRank += 1 / (retrieved.indexOf(target) + 1);
+        const terms = [...words(item.question)];
+        const reranked = retrieved.map(parent => ({
+          parent, score: terms.filter(term => candidateTerms.get(parent.parentId)?.has(term)).length,
+        })).sort((a, b) => b.score - a.score);
+        rerankedReciprocalRank += 1 / (reranked.findIndex(item => item.parent === target) + 1);
+      }
       if (retrieveRelevantChunks(item.question, baseline, 5).some(chunk => chunk.text.includes(item.quote))) baselineHits++;
 
       // Independently verify the labeled source in the complete evidence returned
@@ -71,6 +83,8 @@ export async function benchmark(client: ReturnType<typeof createClient>) {
       baselineRecallAt5: baselineHits / cases.length,
       recallAt5: hits / cases.length,
       relativeRecallLift: baselineHits ? (hits - baselineHits) / baselineHits : null,
+      meanReciprocalRank: reciprocalRank / cases.length,
+      lexicalRerankMeanReciprocalRank: rerankedReciprocalRank / cases.length,
       chunkCoverage: covered / cases.length,
       citationAccuracy: citations ? accurate / citations : null,
       citationCount: citations,
@@ -84,4 +98,8 @@ export async function benchmark(client: ReturnType<typeof createClient>) {
     assert.ok(citations && accurate / citations >= 0.95, "Quote and citation regression");
     if (exceptionTotal) assert.equal(exceptionsCovered, exceptionTotal, "Critical exception omitted");
   }
+}
+
+function words(text: string) {
+  return new Set((text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(word => word.length > 2));
 }

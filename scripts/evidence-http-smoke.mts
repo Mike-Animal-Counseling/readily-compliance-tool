@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { ApiError, createClient } from "../examples/readily-v1/client";
+import type { Report } from "../examples/readily-v1/client";
 import type { ParentBlock } from "../lib/evidence/model";
 import { benchmark } from "../tests/evidence-benchmark";
 import { pdfGrid, pdfLines, synthPdf } from "../tests/fixtures/policy-pdf";
@@ -104,6 +105,7 @@ try {
   assert.equal(matches[0].hits.length, 3);
   assert.equal(new Set(matches[0].hits.flatMap(hit => hit.unitIds)).size, matches[0].hits.flatMap(hit => hit.unitIds).length);
   assert.equal(old.result.status, "needs_review");
+  assert.ok(old.result.batchesRead > 1);
   assert.ok(old.result.reasons.includes("unresolved_clause_reference"));
   const firstEvidence = old.result.excerpts.find(item => item.quote.includes("indigo"));
   assert.ok(firstEvidence);
@@ -130,7 +132,11 @@ try {
   assert.equal(history.items[0].answerOverride, reviewInput.answerOverride);
 
   const second = await client.upload(versionPdf("amber"), { ...metadata, effectiveFrom: "2023-01-01" }, "upload-b");
-  const b = await client.index([second.id], "build-b");
+  const [b, duringBuild] = await Promise.all([
+    client.index([second.id], "build-b"),
+    client.evaluate(question, "during-build", "2024-01-01"),
+  ]);
+  assert.equal(duringBuild.snapshotId, a.id);
   assert.equal((await client.active()).id, a.id);
   const damaged = await client.index([second.id], "build-damaged");
   // Inject a missing index entry freshly created by this test. Production roles cannot do this.
@@ -153,6 +159,41 @@ try {
   assert.equal((await client.report(newer.id)).snapshotId, b.id);
   assert.equal((await client.report(old.id)).snapshotId, a.id);
   console.log("HTTP parent deduplication, tenant isolation, idempotency, historical PDF and snapshot recovery passed");
+
+  const crossPolicy = (await newTenant()).client;
+  const dispatch = await crossPolicy.upload(synthPdf([pdfLines([
+    "Section 4.1 Dispatch", "The lead records manifest reviews. See section 7.1 for exceptions.",
+  ])]), { ...metadata, documentKey: "dispatch" }, "dispatch");
+  const inventory = await crossPolicy.upload(synthPdf([
+    pdfLines(["Section 7.1 Inventory", "Except leased units, which require a separate count."])
+      + "\n" + pdfGrid([["Item", "Quantity"], ["Seal", "Twelve"]], 655),
+  ]), { ...metadata, documentKey: "inventory" }, "inventory");
+  const combined = await crossPolicy.index([dispatch.id, inventory.id], "cross-index");
+  await crossPolicy.activate(combined.id, null, "cross-activate");
+  const questions = ["Which policy records manifest reviews?", "Which rule covers counting leased units?"];
+  const combinedReport = await crossPolicy.evaluate(questions.join(" "), "combined", "2024-01-01");
+  const splitReports: Report[] = [];
+  for (const [index, question] of questions.entries()) {
+    splitReports.push(await crossPolicy.evaluate(question, `split-${index}`, "2024-01-01"));
+  }
+  const rankedVersions = (reports: Report[]) => new Set(reports
+    .flatMap(report => report.result.parents.filter(parent => parent.hits.length).map(parent => parent.documentVersionId)));
+  const referenced = await crossPolicy.evaluate("What does section 4.1 state?", "follow-ref", "2024-01-01");
+  assert.equal(referenced.result.parents.filter(parent => parent.documentVersionId === inventory.id).length, 1);
+  assert.ok(referenced.result.exceptions.some(item => item.documentVersionId === inventory.id));
+  assert.equal(referenced.result.status, "needs_review");
+  const inventoryPath = `/reports/${referenced.id}/evidence/${inventory.id}/p1`;
+  const inventoryParent = await crossPolicy.json<{ block: ParentBlock }>(inventoryPath);
+  const quantity = inventoryParent.block.units.find(unit => unit.table?.row === 2);
+  assert.ok(quantity);
+  const cell = await crossPolicy.locate(referenced.id, {
+    documentVersionId: inventory.id, parentId: "p1", unitId: quantity.id, column: 2, quote: "Twelve",
+  });
+  assert.equal(cell.cell?.text, "Twelve");
+  assert.equal(cell.cell?.box.page, 1);
+  console.log(JSON.stringify({
+    crossPolicySourceCoverage: { combined: rankedVersions([combinedReport]).size, split: rankedVersions(splitReports).size, total: 2 },
+  }));
 
   const standalone = await newTenant();
   const scratch = await mkdtemp(join(tmpdir(), "readily-example-"));
