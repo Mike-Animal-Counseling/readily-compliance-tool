@@ -174,9 +174,22 @@ try {
   await benchmark((await newTenant()).client);
 } finally {
   try {
-    if (tenantIds.length) await sql`delete from readily_v1.tenants where id = any(${sql.array(tenantIds)}::uuid[])`;
-    await sql.end({ timeout: 5 });
+    if (tenantIds.length) {
+      const ids = sql.array(tenantIds);
+      const deleted = await sql`delete from readily_v1.tenants where id = any(${ids}::uuid[]) returning id`;
+      assert.equal(deleted.length, tenantIds.length);
+      const [remaining] = await sql`
+        select exists (select 1 from readily_v1.document_versions where tenant_id = any(${ids}::uuid[])
+          union all select 1 from readily_v1.reports where tenant_id = any(${ids}::uuid[])
+          union all select 1 from readily_v1.snapshot_documents where tenant_id = any(${ids}::uuid[])
+          union all select 1 from readily_v1.requests where tenant_id = any(${ids}::uuid[])
+          union all select 1 from readily_v1.api_keys where tenant_id = any(${ids}::uuid[])) as data
+      `;
+      assert.equal(remaining.data, false);
+      console.log("Synthetic tenant data retention cleanup passed");
+    }
   } finally {
+    await sql.end({ timeout: 5 });
     if (child.exitCode === null && child.pid) {
       if (process.platform === "win32") {
         await runFile("taskkill", ["/PID", String(child.pid), "/T"], { windowsHide: true }).catch(() => {});
