@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -196,22 +195,14 @@ try {
   }));
 
   const standalone = await newTenant();
-  const scratch = await mkdtemp(join(tmpdir(), "readily-example-"));
-  const fixture = join(scratch, "synthetic.pdf");
-  try {
-    await writeFile(fixture, synthPdf([pdfLines(["Section 12.1 Labels", "The label uses raised dots."])]));
-    const run = await runFile(process.execPath, ["examples/readily-v1/run.ts", fixture, "What does section 12.1 state?"], {
-      env: { ...process.env, READILY_API_ORIGIN: origin, READILY_API_KEY: standalone.token }, timeout: 60000, windowsHide: true,
-    });
-    const result = JSON.parse(run.stdout);
-    assert.equal(result.page, 1);
-    assert.equal(result.status, "supported");
-    assert.equal(result.reviewState, "needs_review");
-    console.log("Standalone Node TypeScript example passed");
-  } finally {
-    await unlink(fixture).catch(error => { if (error.code !== "ENOENT") throw error; });
-    await rmdir(scratch);
-  }
+  const run = await runFile(process.execPath, ["examples/readily-v1/run.ts"], {
+    env: { ...process.env, READILY_API_ORIGIN: origin, READILY_API_KEY: standalone.token }, timeout: 60000, windowsHide: true,
+  });
+  const result = JSON.parse(run.stdout);
+  assert.equal(result.page, 1);
+  assert.equal(result.status, "supported");
+  assert.equal(result.reviewState, "needs_review");
+  console.log("Standalone Node TypeScript example passed");
   await benchmark((await newTenant()).client);
 } finally {
   try {

@@ -1,26 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { basename, extname } from "node:path";
-import { readFile, stat } from "node:fs/promises";
 import { createClient } from "./client.ts";
+import { syntheticPolicy } from "./synthetic-policy.ts";
 
 const { READILY_API_ORIGIN: origin, READILY_API_KEY: token } = process.env;
-const [, , file, question] = process.argv;
-if (!origin || !token || !file || !question) {
-  throw new Error('Set READILY_API_ORIGIN and READILY_API_KEY, then run node run.ts policy.pdf "What does section 4.1 state?"');
+if (!origin || !token) {
+  throw new Error("Set READILY_API_ORIGIN and READILY_API_KEY, then run node run.ts");
 }
 const client = createClient(origin, token);
-if (extname(file).toLowerCase() !== ".pdf" || (await stat(file)).size > 2 * 1024 * 1024) {
-  throw new Error("Select a PDF of up to 2 MiB");
-}
-const pdf = await readFile(file);
-if (pdf.length > 2 * 1024 * 1024 || pdf.subarray(0, 5).toString() !== "%PDF-") {
-  throw new Error("Select a valid PDF");
-}
 if ((await client.active()).id) throw new Error("Run the example on an empty test tenant");
 
+const pdf = syntheticPolicy();
+const question = "What does section 4.1 state?";
 const requestId = randomUUID();
 const uploaded = await client.upload(pdf, {
-  documentKey: "example-policy", fileName: basename(file), effectiveFrom: "2020-01-01",
+  documentKey: "example-policy", fileName: "synthetic-policy.pdf", effectiveFrom: "2020-01-01",
 }, `${requestId}:upload`);
 const document = await client.json<{ sha256: string }>(`/documents/${uploaded.id}`);
 const snapshot = await client.index([uploaded.id], `${requestId}:index`);
