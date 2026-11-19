@@ -12,7 +12,7 @@ Uploads are limited to 2 MiB and 30 pages, with storage bounds on parsed layouts
 
 ## Deployment
 
-1. Run `npm ci --ignore-scripts`, `npm audit --audit-level=low`, `npm test`, `npm run lint`, `npm run typecheck` and `npm run build`. Run the application workflow's HTTP checks with a dedicated PostgreSQL/pgvector service. Run the release holdout in a private environment with approved representative PDFs before enabling production.
+1. Run `npm ci --ignore-scripts`, `npm audit --audit-level=low`, `npm test`, `npm run lint`, `npm run typecheck` and `npm run build`. The application workflow serves the built Next.js package with authenticated TLS Redis and certificate-verified PostgreSQL/pgvector. Run the release holdout in a private environment with approved representative PDFs before enabling production.
 2. On the authorized PostgreSQL service, apply the forward-only migrations in `db/migrations` in lexical order using the migration role and `psql -X -v ON_ERROR_STOP=1 -f` for each file. Keep backups and recovery settings appropriate to the environment. Give the runtime role schema usage, read access to the v1 tables, and the following narrowly scoped write privileges. The migration role manages tenants and keys.
 
 ```sql
@@ -27,9 +27,9 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA readily_v1 TO readily_api;
 ```
 
 3. Configure the exact HTTPS origin and production session/Redis settings from the workspace guide. Set `READILY_V1_DATABASE_URL` in the deployment's secret store with the runtime credentials and `sslmode=verify-full` to verify the database certificate and host. Keep `READILY_V1_ENABLED` off while deploying and validating infrastructure.
-4. Provision one enabled test tenant and an expiring key. Generate the key with 32 random bytes encoded as base64url and prefixed by `rdy_`. Store the plaintext in the secret manager. Insert only the hexadecimal SHA-256 of that exact string into `readily_v1.api_keys.digest`, along with the tenant ID, reviewer label, scopes and expiry.
-5. Enable `READILY_V1_ENABLED=true` in the authorized canary and redeploy. Use the [standalone example](../examples/readily-v1/README.md) against the live URL with a synthetic policy. Verify the stored checksum and citation coordinates, an idempotent replay, a foreign-tenant 404, review history and the existing workspace flow. Keep the deployment ID and active snapshot ID from before the change.
-6. Build the replacement snapshot while the previous snapshot serves traffic. Activate it using the compare-and-set request in the [OpenAPI contract](openapi.v1.yaml). Verify the new report uses the new snapshot, the old report still resolves to its original PDF and an out-of-period version is excluded.
+4. Provision two enabled disposable test tenants with empty active snapshots and separate expiring keys. Give the primary key the `read`, `ingest`, `index`, `evaluate` and `review` scopes. Give the isolation key `read`, `index` and `review` for the foreign-resource checks. Generate each key with 32 random bytes encoded as base64url and prefixed by `rdy_`. Store plaintext keys in the secret manager and insert only their hexadecimal SHA-256 digests into `readily_v1.api_keys.digest`, along with the tenant ID, reviewer label, scopes and expiry.
+5. Enable `READILY_V1_ENABLED=true` in the authorized canary and redeploy. Set `READILY_API_ORIGIN` to the exact deployment origin. Load the two keys into `READILY_V1_CANARY_PRIMARY_KEY` and `READILY_V1_CANARY_ISOLATION_KEY`, then run `npm run test:evidence:canary`. The script uploads synthetic policies, verifies full parents, review history, source checksums, idempotent replays and foreign-tenant 404s, then cuts over and rolls back the test snapshot using compare-and-set. The original reports remain pinned across both changes. Record the deployment ID and the two snapshot IDs printed by the script, then purge the disposable tenants.
+6. Run the [standalone example](../examples/readily-v1/README.md) with a fresh empty test tenant. On the production workspace also verify login and upload, evaluate a synthetic questionnaire, record a review and export CSV. Use the [OpenAPI contract](openapi.v1.yaml) for the production tenant rollout.
 
 ## Benchmark
 
