@@ -5,8 +5,8 @@ let client: postgres.Sql | undefined;
 export function evidenceDb() {
   const url = process.env.READILY_V1_DATABASE_URL;
   if (!url) throw new Error("Evidence database unavailable");
-  if (process.env.NODE_ENV === "production" && !["require", "verify-full"].includes(new URL(url).searchParams.get("sslmode") ?? "")) {
-    throw new Error("Evidence database requires TLS");
+  if (process.env.NODE_ENV === "production" && new URL(url).searchParams.get("sslmode") !== "verify-full") {
+    throw new Error("Evidence database requires verified TLS");
   }
   client ??= postgres(url, {
     max: 5,
