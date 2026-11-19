@@ -6,22 +6,31 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import postgres from "postgres";
-import { ApiError, createClient } from "../examples/readily-v1/client";
+import { createClient } from "../examples/readily-v1/client";
 import type { Report } from "../examples/readily-v1/client";
 import type { ParentBlock } from "../lib/evidence/model";
 import { benchmark } from "../tests/evidence-benchmark";
 import { pdfGrid, pdfLines, synthPdf } from "../tests/fixtures/policy-pdf";
+import { expectedError, policyFixtureMetadata, verifyEvidenceCanary, versionPdf } from "./verify-evidence-canary";
 
 const database = process.env.READILY_V1_TEST_DATABASE_URL;
 if (!database) throw new Error("Set READILY_V1_TEST_DATABASE_URL to a disposable local PostgreSQL database");
+const loopback = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const url = new URL(database);
-assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && url.pathname === "/readily_v1_test");
+assert.ok(loopback.has(url.hostname) && url.pathname === "/readily_v1_test");
+const redis = process.env.READILY_V1_TEST_REDIS_URL;
+if (redis) {
+  const cache = new URL(redis);
+  assert.ok(loopback.has(cache.hostname) && cache.protocol === "rediss:" && cache.password,
+    "Production smoke requires a disposable authenticated TLS Redis on loopback");
+  assert.equal(url.searchParams.get("sslmode"), "verify-full");
+}
 const sql = postgres(database, { max: 1, connect_timeout: 5, onnotice: () => {} });
 const origin = "http://127.0.0.1:3011";
+const appOrigin = redis ? origin.replace(/^http:/, "https:") : origin;
+const accessCode = randomBytes(32).toString("hex");
 const tenantIds: string[] = [];
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const expectedError = (status: number, code?: string) => (error: unknown) =>
-  error instanceof ApiError && error.status === status && (!code || code === error.code);
 const runFile = promisify(execFile);
 
 async function newTenant(scopes = ["read", "ingest", "evaluate", "review", "index"]) {
@@ -36,20 +45,9 @@ async function newTenant(scopes = ["read", "ingest", "evaluate", "review", "inde
   return { id, token, client: createClient(origin, token) };
 }
 
-function versionPdf(marker: string) {
-  const rows = Array.from({ length: 20 }, (_, index) =>
-    `Control ${index + 1}: retain the manifest and review the documented checkpoint with the lead.`);
-  return synthPdf([
-    pdfLines(["Section 4.1 Dispatch", `Dispatch inventory uses ${marker} tags.`, ...rows]),
-    pdfLines(["Section 4.1 Dispatch", ...rows]),
-    pdfLines(["Section 4.1 Dispatch", ...rows, "Unless waived under section 99.7, retain the final entry."]),
-    pdfLines(["Section 7.1 Inventory", "Reconcile stock counts."]) + "\n" + pdfGrid([["Item", "Quantity"], ["Seal", "Twelve"]], 655),
-  ]);
-}
-
-const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "dev", "-p", "3011", "-H", "127.0.0.1"], {
-  env: { ...process.env, NODE_ENV: "development", APP_ORIGIN: origin, REDIS_URL: "",
-    DEMO_ACCESS_CODE: randomBytes(32).toString("hex"), SESSION_SECRET: randomBytes(32).toString("hex"),
+const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", redis ? "start" : "dev", "-p", "3011", "-H", "127.0.0.1"], {
+  env: { ...process.env, NODE_ENV: redis ? "production" : "development", APP_ORIGIN: appOrigin, REDIS_URL: redis ?? "",
+    DEMO_ACCESS_CODE: accessCode, SESSION_SECRET: randomBytes(32).toString("hex"),
     OPENROUTER_API_KEY: "", READILY_V1_ENABLED: "true", READILY_V1_DATABASE_URL: database },
   stdio: ["ignore", "pipe", "pipe"],
   detached: process.platform !== "win32",
@@ -60,13 +58,49 @@ for (const stream of [child.stdout, child.stderr]) stream?.on("data", progress =
 
 async function ready() {
   for (let attempt = 0; attempt < 40; attempt++) {
+    if (child.exitCode !== null) break;
     try {
       const response = await fetch(origin + "/api/v1/snapshots/active", { signal: AbortSignal.timeout(3000) });
+      await response.body?.cancel();
       if (response.status === 401) return;
     } catch {}
     await delay(500);
   }
   throw new Error("Local Next.js API did not start\n" + logs);
+}
+
+async function checkProductionWorkspace() {
+  // The local HTTP hop simulates requests forwarded by an HTTPS terminator.
+  const page = await fetch(origin + "/demo-access", { signal: AbortSignal.timeout(10000) });
+  assert.equal(page.status, 200, "Production login page failed");
+  assert.match(page.headers.get("strict-transport-security") ?? "", /max-age=31536000/);
+  assert.match(page.headers.get("content-security-policy") ?? "", /'nonce-[^']+'/);
+  await page.body?.cancel();
+  const login = await fetch(origin + "/api/demo-access", {
+    method: "POST",
+    headers: { origin: appOrigin, "Content-Type": "application/json" },
+    body: JSON.stringify({ code: accessCode }),
+    signal: AbortSignal.timeout(10000),
+  });
+  assert.equal(login.status, 200, "Production login failed");
+  const cookie = login.headers.get("set-cookie") ?? "";
+  assert.match(cookie, /^__Host-readily_session=/);
+  assert.match(cookie, /;\s*Secure(?:;|$)/i);
+  assert.match(cookie, /;\s*HttpOnly(?:;|$)/i);
+  await login.body?.cancel();
+  const body = new FormData();
+  body.append("policies", new Blob([new Uint8Array(versionPdf("indigo"))], { type: "application/pdf" }), "synthetic.pdf");
+  const parsed = await fetch(origin + "/api/parse-policies", {
+    method: "POST",
+    headers: { origin: appOrigin, cookie: cookie.split(";")[0] },
+    body,
+    signal: AbortSignal.timeout(30000),
+  });
+  assert.equal(parsed.status, 200, "Production workspace PDF upload failed");
+  assert.equal((await parsed.json()).documents[0].pageCount, 4);
+  const [connection] = await sql`select ssl from pg_stat_ssl where pid = pg_backend_pid()`;
+  assert.equal(connection.ssl, true);
+  console.log("Built Next.js workspace login, Secure session, isolated PDF upload and TLS services passed");
 }
 
 try {
@@ -77,89 +111,21 @@ try {
     }
   }
   await ready();
+  if (redis) await checkProductionWorkspace();
   const { client } = await newTenant();
   const other = (await newTenant()).client;
   const readOnly = (await newTenant(["read"])).client;
   await assert.rejects(readOnly.evaluate("Check scope", "scope"), expectedError(403, "scope_required"));
-  const original = versionPdf("indigo");
-  const metadata = { documentKey: "dispatch", fileName: "synthetic.pdf", effectiveFrom: "2020-01-01" };
-  const first = await client.upload(original, metadata, "upload");
-  assert.equal((await client.upload(original, metadata, "upload")).id, first.id);
-  await assert.rejects(client.upload(original, { ...metadata, documentKey: "different" }, "upload"),
-    expectedError(409, "idempotency_conflict"));
-  await assert.rejects(other.request(`/documents/${first.id}/source`), expectedError(404));
-  await assert.rejects(other.index([first.id], "index"), expectedError(404));
-
-  const a = await client.index([first.id], "build-a");
-  await client.activate(a.id, null, "activate-a");
-  await assert.rejects(other.activate(a.id, null, "foreign-activate"), expectedError(404));
-  const question = "What does section 4.1 state?";
-  const [old, replay] = await Promise.all([
-    client.evaluate(question, "parallel-eval", "2024-01-01"),
-    client.evaluate(question, "parallel-eval", "2024-01-01"),
-  ]);
-  assert.equal(replay.id, old.id);
-  const matches = old.result.parents.filter(parent => parent.parentId === "p1");
-  assert.equal(matches.length, 1);
-  assert.equal(matches[0].hits.length, 3);
-  assert.equal(new Set(matches[0].hits.flatMap(hit => hit.unitIds)).size, matches[0].hits.flatMap(hit => hit.unitIds).length);
-  assert.equal(old.result.status, "needs_review");
-  assert.ok(old.result.batchesRead > 1);
-  assert.ok(old.result.reasons.includes("unresolved_clause_reference"));
-  const firstEvidence = old.result.excerpts.find(item => item.quote.includes("indigo"));
-  assert.ok(firstEvidence);
-  const evidencePath = `/reports/${old.id}/evidence/${first.id}/p1`;
-  const initialLocation = await client.locate(old.id, firstEvidence);
-  assert.equal(initialLocation.unit.boxes[0].page, 1);
-  const complete = await client.json<{ block: ParentBlock }>(evidencePath);
-  assert.ok(complete.block.units.at(-1)?.text.includes("99.7"));
-  assert.ok(complete.block.units.some(item => item.boxes.some(box => box.page === 3)));
-  assert.equal(old.result.exceptions.length, 1);
-  assert.ok(old.result.exceptions[0].quote.includes("retain the final entry"));
-  await assert.rejects(other.report(old.id), expectedError(404));
-  await assert.rejects(other.request(evidencePath), expectedError(404));
-  await assert.rejects(other.review(old.id, { state: "approved", notes: "invalid tenant", expectedRevision: null }, "foreign-review"),
-    expectedError(404));
-
-  const reviewInput = { state: "approved", notes: "Synthetic reviewer checked the exception manually.",
-    expectedRevision: null, answerOverride: "Synthetic approved answer." } as const;
-  const review = await client.review(old.id, reviewInput, "review");
-  assert.equal((await client.review(old.id, reviewInput, "review")).revision, review.revision);
-  await assert.rejects(client.review(old.id, reviewInput, "stale-review"), expectedError(409, "review_revision_changed"));
-  assert.equal((await client.report(old.id)).reviewState, "approved");
-  const history = await client.json<{ items: { answerOverride: string }[] }>(`/reports/${old.id}/reviews`);
-  assert.equal(history.items[0].answerOverride, reviewInput.answerOverride);
-
-  const second = await client.upload(versionPdf("amber"), { ...metadata, effectiveFrom: "2023-01-01" }, "upload-b");
-  const [b, duringBuild] = await Promise.all([
-    client.index([second.id], "build-b"),
-    client.evaluate(question, "during-build", "2024-01-01"),
-  ]);
-  assert.equal(duringBuild.snapshotId, a.id);
-  assert.equal((await client.active()).id, a.id);
-  const damaged = await client.index([second.id], "build-damaged");
-  // Inject a missing index entry freshly created by this test. Production roles cannot do this.
-  await sql`delete from readily_v1.index_entries where snapshot_id = ${damaged.id} and child_id = 'p1-c1'`;
-  await assert.rejects(client.activate(damaged.id, a.id, "damaged"), expectedError(409, "index_validation_failed"));
-  assert.equal((await client.active()).id, a.id);
-  await client.activate(b.id, a.id, "activate-b");
-  await assert.rejects(client.activate(a.id, a.id, "bad-cas"), expectedError(409, "active_snapshot_changed"));
-  const newer = await client.evaluate(question, "new-eval", "2024-01-01");
-  assert.equal(newer.snapshotId, b.id);
-  assert.ok(newer.result.excerpts.some(item => item.documentVersionId === second.id && item.quote.includes("amber")));
-  const beforeEffective = await client.evaluate(question, "before-effective", "2020-06-01");
-  assert.equal(beforeEffective.result.status, "insufficient");
-  assert.deepEqual(await client.json(evidencePath), complete);
-  assert.equal(sha(Buffer.from(await (await client.request(`/documents/${first.id}/source`)).arrayBuffer())), sha(original));
-
-  await client.activate(a.id, b.id, "rollback");
-  const recovered = await client.evaluate(question, "rollback-eval", "2024-01-01");
-  assert.equal(recovered.snapshotId, a.id);
-  assert.equal((await client.report(newer.id)).snapshotId, b.id);
-  assert.equal((await client.report(old.id)).snapshotId, a.id);
-  console.log("HTTP parent deduplication, tenant isolation, idempotency, historical PDF and snapshot recovery passed");
+  await verifyEvidenceCanary(client, other, async (pendingVersionId, activeSnapshotId) => {
+    const damaged = await client.index([pendingVersionId], "build-damaged");
+    // Inject a missing entry into the disposable index. The runtime role cannot delete entries.
+    await sql`delete from readily_v1.index_entries where snapshot_id = ${damaged.id} and child_id = 'p1-c1'`;
+    await assert.rejects(client.activate(damaged.id, activeSnapshotId, "damaged"), expectedError(409, "index_validation_failed"));
+    assert.equal((await client.active()).id, activeSnapshotId);
+  });
 
   const crossPolicy = (await newTenant()).client;
+  const metadata = policyFixtureMetadata;
   const dispatch = await crossPolicy.upload(synthPdf([pdfLines([
     "Section 4.1 Dispatch", "The lead records manifest reviews. See section 7.1 for exceptions.",
   ])]), { ...metadata, documentKey: "dispatch" }, "dispatch");
@@ -203,6 +169,16 @@ try {
   assert.equal(result.status, "supported");
   assert.equal(result.reviewState, "needs_review");
   console.log("Standalone Node TypeScript example passed");
+  if (redis) {
+    const primary = await newTenant();
+    const isolation = await newTenant(["read", "index", "review"]);
+    const canary = await runFile(process.execPath, ["--import", "tsx", "scripts/evidence-live-smoke.mts"], {
+      env: { ...process.env, READILY_API_ORIGIN: origin, READILY_V1_CANARY_PRIMARY_KEY: primary.token,
+        READILY_V1_CANARY_ISOLATION_KEY: isolation.token }, timeout: 60000, windowsHide: true,
+    });
+    assert.match(canary.stdout, /snapshot recovery passed/);
+    console.log("Standalone canary command passed");
+  }
   await benchmark((await newTenant()).client);
 } finally {
   try {
