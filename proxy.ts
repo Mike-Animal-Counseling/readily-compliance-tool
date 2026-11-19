@@ -13,7 +13,8 @@ export async function proxy(request: NextRequest) {
     const config = accessConfig();
     if (request.headers.get('host') !== new URL(config.origin).host) return secure(NextResponse.json({ error: 'Host not allowed' }, { status: 400 }));
     const path = request.nextUrl.pathname;
-    const publicPath = path.startsWith('/_next/') || path === '/favicon.ico' || path === '/demo-access' || path === '/api/demo-access';
+    const publicPath = path.startsWith('/_next/') || path === '/favicon.ico' || path === '/demo-access' ||
+      path === '/api/demo-access' || path.startsWith('/api/v1/');
     if (!publicPath && !await requestSession(request)) {
       if (path.startsWith('/api/')) return secure(NextResponse.json({ error: 'Authentication required' }, { status: 401 }));
       const login = new URL('/demo-access', config.origin); login.searchParams.set('redirectTo', safeRedirect(path + request.nextUrl.search));
