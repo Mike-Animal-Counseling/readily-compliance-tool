@@ -10,6 +10,7 @@
     "ingest:policies": "tsx scripts/ingest-preloaded-policies.ts",
     "test": "tsx --test tests/*.test.ts",
     "test:http": "node scripts/http-security-smoke.mjs",
+    "test:evidence:http": "tsx scripts/evidence-http-smoke.mts",
     "typecheck": "node node_modules/typescript-7/bin/tsc --noEmit"
   },
   "dependencies": {

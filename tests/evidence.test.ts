@@ -1,12 +1,28 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readAssessment } from "../lib/evidence/assessment";
+import { evidenceDb } from "../lib/evidence/connection";
 import { parsePolicy } from "../lib/evidence/layout";
 import { makeChildren } from "../lib/evidence/model";
 import type { EvidenceUnit, ParentBlock } from "../lib/evidence/model";
 import { parentBatches, rankParents } from "../lib/evidence/parents";
 import type { ChildHit } from "../lib/evidence/parents";
 import { pdfGrid, pdfLines, synthPdf } from "./fixtures/policy-pdf";
+
+test("production evidence requires database certificate and hostname verification", () => {
+  const env: Record<string, string | undefined> = process.env;
+  const previous = { NODE_ENV: env.NODE_ENV, READILY_V1_DATABASE_URL: env.READILY_V1_DATABASE_URL };
+  try {
+    env.NODE_ENV = "production";
+    env.READILY_V1_DATABASE_URL = "postgresql://localhost/disposable?sslmode=require";
+    assert.throws(evidenceDb, /requires verified TLS/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete env[key];
+      else env[key] = value;
+    }
+  }
+});
 
 test("rank by best child, retaining three hits with distinct version and parent identities", () => {
   const hit = (documentVersionId: string, parentId: string, childId: string, score: number): ChildHit =>
@@ -38,7 +54,10 @@ test("bounded PDF worker preserves nested clauses, cross-page table rows and sou
   assert.equal(new Set(rows.map(unit => unit.table?.id)).size, 1);
   assert.deepEqual(rows[3].table?.cells.map(cell => cell.text), ["Transfers", "Keep twenty days"]);
   assert.equal(rows[3].table?.cells[1].box.page, 2);
-  assert.ok(rows[3].table!.cells[1].box.right > rows[3].table!.cells[1].box.left);
+  const box = rows[3].table!.cells[1].box;
+  assert.ok(Math.abs(box.left - 240 / 612) < 0.001);
+  assert.ok(Math.abs(box.right - 540 / 612) < 0.001);
+  assert.ok(Math.abs(box.top - (792 - 721) / 792) < 0.001);
 });
 
 test("scan without a text layer is flagged", async () => {

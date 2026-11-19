@@ -1,0 +1,455 @@
+openapi: 3.1.0
+info:
+  title: Readily Policy Evidence API
+  version: 1.0.0
+  description: |
+    Authenticated tenant API. Send an Idempotency-Key on every POST. Requests with
+    the same tenant, operation, key and normalized input return the original
+    successful response. A different input for that key returns 409.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+paths:
+  /documents:
+    post:
+      operationId: uploadPolicyVersion
+      description: Upload a PDF of up to 2 MiB and 30 pages. Requires ingest scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - {name: documentKey, in: query, required: true, schema: {type: string, pattern: '^[A-Za-z0-9._-]{1,100}$'}}
+        - {name: fileName, in: query, required: true, schema: {type: string, minLength: 5, maxLength: 180}}
+        - {name: effectiveFrom, in: query, required: true, schema: {type: string, format: date}}
+        - {name: effectiveUntil, in: query, description: Exclusive end date, schema: {type: string, format: date}}
+      requestBody:
+        required: true
+        content:
+          application/pdf:
+            schema: {type: string, format: binary}
+      responses:
+        '201':
+          description: Immutable policy version
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentVersion'}
+        default: {$ref: '#/components/responses/Error'}
+  /documents/{versionId}:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      operationId: getPolicyVersion
+      description: Requires read scope.
+      responses:
+        '200':
+          description: File name, effective dates, parse status and warnings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DocumentVersion'
+                  - type: object
+                    required: [documentKey, fileName, effectiveFrom, effectiveUntil]
+                    properties:
+                      documentKey: {type: string}
+                      fileName: {type: string}
+                      effectiveFrom: {type: string, format: date}
+                      effectiveUntil: {type: [string, 'null'], format: date}
+        default: {$ref: '#/components/responses/Error'}
+  /documents/{versionId}/source:
+    parameters:
+      - $ref: '#/components/parameters/VersionId'
+    get:
+      operationId: downloadOriginalPolicy
+      description: Original immutable bytes. Requires read scope.
+      responses:
+        '200':
+          description: PDF attachment
+          content:
+            application/pdf:
+              schema: {type: string, format: binary}
+        default: {$ref: '#/components/responses/Error'}
+  /snapshots:
+    post:
+      operationId: buildSnapshot
+      description: Build an inactive snapshot from up to 20 immutable policy versions. Requires index scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [documentVersionIds]
+              properties:
+                documentVersionIds: {type: array, minItems: 1, maxItems: 20, uniqueItems: true, items: {type: string, format: uuid}}
+      responses:
+        '201':
+          description: Snapshot ready
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Snapshot'}
+        default: {$ref: '#/components/responses/Error'}
+  /snapshots/active:
+    get:
+      operationId: getActiveSnapshot
+      description: Requires read scope.
+      responses:
+        '200':
+          description: Active snapshot ID or null
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: [string, 'null'], format: uuid}
+        default: {$ref: '#/components/responses/Error'}
+  /snapshots/{snapshotId}:
+    parameters:
+      - $ref: '#/components/parameters/SnapshotId'
+    get:
+      operationId: getSnapshotStatus
+      description: Requires read scope.
+      responses:
+        '200':
+          description: Snapshot status
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Snapshot'}
+        default: {$ref: '#/components/responses/Error'}
+  /snapshots/{snapshotId}/activate:
+    parameters:
+      - $ref: '#/components/parameters/SnapshotId'
+    post:
+      operationId: activateSnapshot
+      description: Atomically compare and set the tenant's active snapshot. Requires index scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedActiveSnapshotId]
+              properties:
+                expectedActiveSnapshotId: {type: [string, 'null'], format: uuid}
+      responses:
+        '200':
+          description: Snapshot active
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, previousSnapshotId, status]
+                properties:
+                  id: {type: string, format: uuid}
+                  previousSnapshotId: {type: [string, 'null'], format: uuid}
+                  status: {const: active}
+        default: {$ref: '#/components/responses/Error'}
+  /reports:
+    post:
+      operationId: assessQuestion
+      description: Evaluate one question against the active snapshot. Requires evaluate scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: {type: string, minLength: 1, maxLength: 1000}
+                asOf: {type: string, format: date, description: Defaults to the current UTC date}
+      responses:
+        '201':
+          description: Completed assessment pinned to a snapshot
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Report'}
+        default: {$ref: '#/components/responses/Error'}
+  /reports/{reportId}:
+    parameters:
+      - $ref: '#/components/parameters/ReportId'
+    get:
+      operationId: getReport
+      description: Requires read scope.
+      responses:
+        '200':
+          description: Stored assessment and latest review state
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Report'
+                  - type: object
+                    required: [reviewState, reviewRevision]
+                    properties:
+                      reviewState: {enum: [pending, approved, needs_review]}
+                      reviewRevision: {type: [string, 'null']}
+        default: {$ref: '#/components/responses/Error'}
+  /reports/{reportId}/evidence/{versionId}/{parentId}:
+    parameters:
+      - $ref: '#/components/parameters/ReportId'
+      - $ref: '#/components/parameters/VersionId'
+      - $ref: '#/components/parameters/ParentId'
+    get:
+      operationId: getCompleteParent
+      description: Returns the full parent once with all child hit locations. Requires read scope.
+      responses:
+        '200':
+          description: Complete ordered parent and original PDF path
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [documentVersionId, source, block, hits]
+                properties:
+                  documentVersionId: {type: string, format: uuid}
+                  source: {type: string}
+                  block:
+                    type: object
+                    required: [id, units]
+                    properties:
+                      id: {type: string}
+                      units: {type: array, items: {$ref: '#/components/schemas/EvidenceUnit'}}
+                  hits: {type: array, items: {$ref: '#/components/schemas/ChildHit'}}
+        default: {$ref: '#/components/responses/Error'}
+  /reports/{reportId}/evidence/{versionId}/{parentId}/{unitId}:
+    parameters:
+      - $ref: '#/components/parameters/ReportId'
+      - $ref: '#/components/parameters/VersionId'
+      - $ref: '#/components/parameters/ParentId'
+      - {name: unitId, in: path, required: true, schema: {type: string}}
+      - {name: column, in: query, schema: {type: integer, minimum: 1}}
+    get:
+      operationId: locateEvidence
+      description: Locate the cited text or table cell in the report's pinned PDF. Requires read scope.
+      responses:
+        '200':
+          description: Source, unit and optional cell
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [documentVersionId, parentId, source, unit]
+                properties:
+                  documentVersionId: {type: string, format: uuid}
+                  parentId: {type: string}
+                  source: {type: string}
+                  unit: {$ref: '#/components/schemas/EvidenceUnit'}
+                  cell: {$ref: '#/components/schemas/Cell'}
+        default: {$ref: '#/components/responses/Error'}
+  /reports/{reportId}/reviews:
+    parameters:
+      - $ref: '#/components/parameters/ReportId'
+    get:
+      operationId: listReviews
+      description: Newest first, up to 50 per request. Requires read scope.
+      parameters:
+        - {name: before, in: query, schema: {type: string, pattern: '^[0-9]{1,19}$'}}
+      responses:
+        '200':
+          description: Review revisions and cursor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextBefore]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Review'}}
+                  nextBefore: {type: [string, 'null']}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: recordReview
+      description: Append a review revision and optional human answer. Requires review scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [state, notes, expectedRevision]
+              properties:
+                state: {enum: [approved, needs_review]}
+                notes: {type: string, minLength: 1, maxLength: 4000}
+                expectedRevision: {type: [string, 'null'], pattern: '^[0-9]{1,19}$'}
+                answerOverride: {type: string, minLength: 1, maxLength: 4000}
+      responses:
+        '201':
+          description: Review receipt
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Review'}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$'}
+    VersionId: {name: versionId, in: path, required: true, schema: {type: string, format: uuid}}
+    SnapshotId: {name: snapshotId, in: path, required: true, schema: {type: string, format: uuid}}
+    ReportId: {name: reportId, in: path, required: true, schema: {type: string, format: uuid}}
+    ParentId: {name: parentId, in: path, required: true, schema: {type: string}}
+  headers:
+    Replayed: {description: True when returning a prior successful response, schema: {type: boolean}}
+  responses:
+    Error:
+      description: Structured API error. Rate limit responses may include Retry-After.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code]
+                properties:
+                  code: {type: string}
+  schemas:
+    DocumentVersion:
+      type: object
+      required: [id, status, sha256, parserVersion, pageCount, warnings]
+      properties:
+        id: {type: string, format: uuid}
+        status: {enum: [ready, needs_review]}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        parserVersion: {type: string}
+        pageCount: {type: integer, minimum: 1, maximum: 30}
+        warnings:
+          type: array
+          items:
+            type: object
+            required: [page, code]
+            properties:
+              page: {type: integer, minimum: 1}
+              code: {enum: [unreadable_page, uncertain_layout]}
+    Snapshot:
+      type: object
+      required: [id, status, embeddingVersion, indexVersion, entryCount]
+      properties:
+        id: {type: string, format: uuid}
+        status: {enum: [ready, active]}
+        embeddingVersion: {type: string}
+        indexVersion: {type: string}
+        entryCount: {type: integer, minimum: 1}
+    Box:
+      type: object
+      description: Page-relative coordinates from top left.
+      required: [page, left, top, right, bottom]
+      properties:
+        page: {type: integer, minimum: 1}
+        left: {type: number, minimum: 0, maximum: 1}
+        top: {type: number, minimum: 0, maximum: 1}
+        right: {type: number, minimum: 0, maximum: 1}
+        bottom: {type: number, minimum: 0, maximum: 1}
+    Cell:
+      type: object
+      required: [column, text, box]
+      properties:
+        column: {type: integer, minimum: 1}
+        text: {type: string}
+        box: {$ref: '#/components/schemas/Box'}
+    EvidenceUnit:
+      type: object
+      required: [id, kind, text, boxes, clause, references, exception]
+      properties:
+        id: {type: string}
+        kind: {enum: [clause, paragraph, table_row]}
+        text: {type: string}
+        boxes: {type: array, items: {$ref: '#/components/schemas/Box'}}
+        clause: {type: [string, 'null']}
+        references: {type: array, items: {type: string}}
+        exception: {type: boolean}
+        table:
+          type: object
+          required: [id, row, header, cells]
+          properties:
+            id: {type: string}
+            row: {type: integer, minimum: 1}
+            header: {type: boolean}
+            cells: {type: array, items: {$ref: '#/components/schemas/Cell'}}
+    Citation:
+      type: object
+      required: [documentVersionId, parentId, unitId, quote]
+      properties:
+        documentVersionId: {type: string, format: uuid}
+        parentId: {type: string}
+        unitId: {type: string}
+        quote: {type: string}
+        column: {type: integer, minimum: 1}
+    ChildHit:
+      type: object
+      required: [documentVersionId, parentId, childId, unitIds, score]
+      properties:
+        documentVersionId: {type: string, format: uuid}
+        parentId: {type: string}
+        childId: {type: string}
+        unitIds: {type: array, items: {type: string}}
+        score: {type: number}
+    ParentMatch:
+      type: object
+      required: [documentVersionId, parentId, score, hits]
+      properties:
+        documentVersionId: {type: string, format: uuid}
+        parentId: {type: string}
+        score: {type: number}
+        hits: {type: array, items: {$ref: '#/components/schemas/ChildHit'}}
+    Report:
+      type: object
+      required: [id, snapshotId, asOf, status, result]
+      properties:
+        id: {type: string, format: uuid}
+        snapshotId: {type: string, format: uuid}
+        asOf: {type: string, format: date}
+        status: {const: completed}
+        result:
+          type: object
+          required: [question, status, reasons, parents, claims, excerpts, exceptions, batchesRead]
+          properties:
+            question: {type: string}
+            status: {enum: [supported, insufficient, needs_review]}
+            reasons: {type: array, items: {type: string}}
+            parents: {type: array, items: {$ref: '#/components/schemas/ParentMatch'}}
+            claims:
+              type: array
+              items:
+                type: object
+                required: [statement, evidence]
+                properties:
+                  statement: {type: string}
+                  evidence: {type: array, items: {$ref: '#/components/schemas/Citation'}}
+            excerpts: {type: array, items: {$ref: '#/components/schemas/Citation'}}
+            exceptions: {type: array, items: {$ref: '#/components/schemas/Citation'}}
+            batchesRead: {type: integer, minimum: 0}
+    Review:
+      type: object
+      required: [reportId, revision, reviewer, state, notes, answerOverride, createdAt]
+      properties:
+        reportId: {type: string, format: uuid}
+        revision: {type: string}
+        reviewer: {type: string}
+        state: {enum: [approved, needs_review]}
+        notes: {type: string}
+        answerOverride: {type: [string, 'null']}
+        createdAt: {type: string, format: date-time}

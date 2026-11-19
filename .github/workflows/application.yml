@@ -13,6 +13,20 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      evidence-postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: readily_v1_test
+          POSTGRES_USER: readily_test
+          POSTGRES_PASSWORD: readily_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U readily_test -d readily_v1_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -39,3 +53,7 @@ jobs:
         run: npm run build
       - name: Real HTTP login and isolated PDF upload
         run: npm run test:http
+      - name: Third-party HTTP, pgvector and independent holdout
+        run: npm run test:evidence:http
+        env:
+          READILY_V1_TEST_DATABASE_URL: postgresql://readily_test:readily_test@localhost:${{ job.services.evidence-postgres.ports[5432] }}/readily_v1_test
