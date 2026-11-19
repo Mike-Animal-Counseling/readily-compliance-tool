@@ -15,7 +15,7 @@ type NormalizedTextItem = {
 
 const LINE_Y_THRESHOLD = 0.35;
 
-function decodePdfText(value: string) {
+export function decodePdfText(value: string) {
   try {
     return decodeURIComponent(value);
   } catch {
@@ -84,7 +84,7 @@ function convertParsedPage(page: ParsedPdfPage, pageNumber: number): PdfPage {
 }
 
 let activeWorkers = 0;
-async function parsePdfBuffer(data: Uint8Array): Promise<ParsedPdfOutput> {
+export async function parsePdfBuffer(data: Uint8Array): Promise<ParsedPdfOutput> {
   if (data.length > 2 * 1024 * 1024 || Buffer.from(data.subarray(0, 5)).toString() !== '%PDF-') throw new Error('PDF must be valid and at most 2 MiB');
   if (activeWorkers >= 2) throw new Error("PDF processor busy");
   activeWorkers++;
