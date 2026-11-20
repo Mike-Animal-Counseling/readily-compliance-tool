@@ -12,6 +12,7 @@ export type Report = {
   reviewState?: "pending" | "approved" | "needs_review";
   reviewRevision?: string | null;
   result: {
+    question: string;
     status: "supported" | "insufficient" | "needs_review";
     reasons: string[];
     parents: ParentMatch[];
@@ -20,6 +21,12 @@ export type Report = {
     exceptions: Citation[];
     batchesRead: number;
   };
+};
+export type BatchReport = {
+  snapshotId: string;
+  asOf: string;
+  status: "completed";
+  reports: Report[];
 };
 export type Box = { page: number; left: number; top: number; right: number; bottom: number };
 export type LocatedUnit = {
@@ -95,6 +102,9 @@ export function createClient(endpoint: string, token: string) {
     },
     evaluate(question: string, key: string, asOf?: string) {
       return json<Report>("/reports", "POST", { question, asOf }, key);
+    },
+    evaluateBatch(questions: string[], key: string, context?: { asOf?: string; snapshotId?: string }) {
+      return json<BatchReport>("/reports/batch", "POST", { questions, ...context }, key);
     },
     report(id: string) {
       return json<Report>(`/reports/${id}`);

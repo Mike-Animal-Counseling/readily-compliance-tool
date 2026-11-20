@@ -33,6 +33,9 @@ export async function POST(request: Request, context: Context) {
     if (collection === "snapshots") return guardV1("index", api.indexSnapshot)(request);
     if (collection === "reports") return guardV1("evaluate", api.evaluate)(request);
   }
+  if (segments.length === 2 && collection === "reports" && id === "batch") {
+    return guardV1("evaluate", api.evaluateBatch)(request);
+  }
   if (segments.length === 3 && collection === "snapshots" && task === "activate") {
     return guardV1("index", (req, principal) => api.activate(req, principal, id))(request);
   }

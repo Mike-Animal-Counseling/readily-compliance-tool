@@ -43,6 +43,11 @@ export async function verifyEvidenceCanary(
   await client.activate(a.id, null, "activate-a");
   await assert.rejects(other.activate(a.id, null, "foreign-activate"), expectedError(404));
   const question = "What does section 4.1 state?";
+  const questions = [question, "Show section 7.1"];
+  const questionnaire = await client.evaluateBatch(questions, "questionnaire");
+  assert.equal(questionnaire.snapshotId, a.id);
+  assert.deepEqual(questionnaire.reports.map(report => report.result.question), questions);
+  assert.ok(questionnaire.reports.every(report => report.snapshotId === questionnaire.snapshotId && report.asOf === questionnaire.asOf));
   const [old, replay] = await Promise.all([
     client.evaluate(question, "parallel-eval", "2024-01-01"),
     client.evaluate(question, "parallel-eval", "2024-01-01"),
@@ -86,6 +91,8 @@ export async function verifyEvidenceCanary(
   ]);
   assert.equal(duringBuild.snapshotId, a.id);
   assert.equal((await client.active()).id, a.id);
+  await assert.rejects(client.evaluateBatch(questions, "unactivated-questionnaire", { snapshotId: b.id }),
+    expectedError(404, "usable_snapshot_not_found"));
   await checkInactiveIndex?.(second.id, a.id);
   console.log(JSON.stringify({ previousSnapshotId: a.id, candidateSnapshotId: b.id }));
   let newer: Awaited<ReturnType<Client["evaluate"]>>;
@@ -94,6 +101,14 @@ export async function verifyEvidenceCanary(
     await assert.rejects(client.activate(a.id, a.id, "bad-cas"), expectedError(409, "active_snapshot_changed"));
     newer = await client.evaluate(question, "new-eval", "2024-01-01");
     assert.equal(newer.snapshotId, b.id);
+    const replayed = await client.evaluateBatch(questions, "questionnaire");
+    assert.deepEqual(replayed, questionnaire);
+    const continued = await client.evaluateBatch([questions[1]], "next-questionnaire-batch", {
+      snapshotId: questionnaire.snapshotId, asOf: questionnaire.asOf,
+    });
+    assert.equal(continued.reports[0].snapshotId, a.id);
+    assert.equal(continued.reports[0].asOf, questionnaire.asOf);
+    assert.equal((await client.report(continued.reports[0].id)).snapshotId, a.id);
     assert.ok(newer.result.excerpts.some(item => item.documentVersionId === second.id && item.quote.includes("amber")));
     const beforeEffective = await client.evaluate(question, "before-effective", "2020-06-01");
     assert.equal(beforeEffective.result.status, "insufficient");

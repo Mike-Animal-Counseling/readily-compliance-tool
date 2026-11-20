@@ -8,8 +8,11 @@ import type { Principal } from "./http";
 import type { ParentBlock } from "./model";
 import { embeddingVersion, indexVersion } from "./model";
 import { activateSnapshot, buildSnapshot, createDocument, EvidenceError } from "./repository";
+import type { Transaction } from "./repository";
 
 const uuid = z.uuid().transform(value => value.toLowerCase());
+const questionText = z.string().trim().min(1).max(1000).refine(value => !value.includes("\0"));
+const assessmentDate = z.iso.date().refine(value => !value.startsWith("0000-")).optional();
 const metadata = z.object({
   documentKey: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
   fileName: z.string().trim().min(5).max(180).regex(/^[^/\\\p{C}]+\.pdf$/iu),
@@ -81,25 +84,52 @@ export async function snapshotStatus(tenant: string, snapshot: string) {
   return Response.json(row);
 }
 
+async function assessmentContext(sql: Transaction, tenant: string, asOf?: string, snapshotId?: string) {
+  const [row] = await sql<{ snapshot: string; day: string }[]>`
+    select s.id as snapshot, (now() at time zone 'UTC')::date::text as day
+    from readily_v1.tenants t join readily_v1.snapshots s
+      on s.tenant_id = t.id and s.id = coalesce(${snapshotId ?? null}::uuid, t.active_snapshot_id)
+      and s.embedding_version = ${embeddingVersion} and s.index_version = ${indexVersion}
+    where t.id = ${tenant} and (
+      s.id = t.active_snapshot_id or exists (
+        select 1 from readily_v1.activations a where a.tenant_id = t.id and a.new_snapshot_id = s.id
+      )
+    )
+  `;
+  if (!row) {
+    if (snapshotId) throw new EvidenceError(404, "usable_snapshot_not_found");
+    throw new EvidenceError(409, "active_snapshot_required");
+  }
+  return { snapshotId: row.snapshot, asOf: asOf ?? row.day };
+}
+
+async function createReport(sql: Transaction, tenant: string, context: { snapshotId: string; asOf: string }, question: string) {
+  const id = randomUUID();
+  const { snapshotId, asOf } = context;
+  const result = await assess(sql, tenant, snapshotId, asOf, question);
+  await sql`insert into readily_v1.reports (tenant_id, id, snapshot_id, as_of, result)
+    values (${tenant}, ${id}, ${snapshotId}, ${asOf}, ${sql.json(result)})`;
+  return { id, snapshotId, asOf, status: "completed" as const, result };
+}
+
 export async function evaluate(request: Request, { tenant }: Principal) {
-  const input = validate(z.object({
-    question: z.string().trim().min(1).max(1000).refine(value => !value.includes("\0")), asOf: z.iso.date().optional(),
-  }).strict(), await readJson(request));
+  const input = validate(z.object({ question: questionText, asOf: assessmentDate }).strict(), await readJson(request));
   return idempotent(request, tenant, "evaluate", "evaluate", input, async sql => {
-    const [{ snapshot, day }] = await sql<{ snapshot: string | null; day: string }[]>`
-      select s.id as snapshot, (now() at time zone 'UTC')::date::text as day
-      from readily_v1.tenants t left join readily_v1.snapshots s
-        on s.tenant_id = t.id and s.id = t.active_snapshot_id
-        and s.embedding_version = ${embeddingVersion} and s.index_version = ${indexVersion}
-      where t.id = ${tenant}
-    `;
-    if (!snapshot) throw new EvidenceError(409, "active_snapshot_required");
-    const asOf = input.asOf ?? day;
-    const id = randomUUID();
-    const result = await assess(sql, tenant, snapshot, asOf, input.question);
-    await sql`insert into readily_v1.reports (tenant_id, id, snapshot_id, as_of, result)
-      values (${tenant}, ${id}, ${snapshot}, ${asOf}, ${sql.json(result)})`;
-    return { id, snapshotId: snapshot, asOf, status: "completed", result };
+    return createReport(sql, tenant, await assessmentContext(sql, tenant, input.asOf), input.question);
+  });
+}
+
+export async function evaluateBatch(request: Request, { tenant }: Principal) {
+  const input = validate(z.object({
+    questions: z.array(questionText).min(1).max(5), asOf: assessmentDate, snapshotId: uuid.optional(),
+  }).strict(), await readJson(request));
+  return idempotent(request, tenant, "evaluate_batch", "evaluate", input, async sql => {
+    const context = await assessmentContext(sql, tenant, input.asOf, input.snapshotId);
+    const reports: Awaited<ReturnType<typeof createReport>>[] = [];
+    for (const question of input.questions) {
+      reports.push(await createReport(sql, tenant, context, question));
+    }
+    return { ...context, status: "completed", reports };
   });
 }
 

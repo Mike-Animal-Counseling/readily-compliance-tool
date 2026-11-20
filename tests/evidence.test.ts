@@ -65,6 +65,19 @@ test("scan without a text layer is flagged", async () => {
   assert.deepEqual(parsed.warnings, [{ page: 2, code: "unreadable_page" }]);
 });
 
+test("exact table quotations cite each nonempty cell at its own column", async () => {
+  const parsed = await parsePolicy(synthPdf([pdfLines(["Section 4.1 Retention schedule"])
+    + "\n" + pdfGrid([["Record", "Minimum period"], ["Ledger", "20 days"]], 690)]));
+  const [block] = parsed.parents;
+  const result = readAssessment("Quote section 4.1", [{
+    documentVersionId: "synthetic-version", parentId: block.id, score: 1, hits: [], block,
+  }], []);
+  assert.equal(result.status, "supported");
+  const row = result.claims.find(claim => claim.statement === "Ledger | 20 days");
+  assert.deepEqual(row?.evidence.map(({ quote, column }) => [quote, column]), [["Ledger", 1], ["20 days", 2]]);
+  assert.equal(row?.evidence[0].unitId, row?.evidence[1].unitId);
+});
+
 test("long parents are read through the final exception with table headers in later batches", () => {
   const unit = (index: number, properties: Partial<EvidenceUnit> = {}): EvidenceUnit => ({
     id: `u${index}`, clause: "4.1", kind: "paragraph", boxes: [], text: "Control statement. ".repeat(44),
