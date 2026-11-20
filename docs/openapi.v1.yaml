@@ -179,6 +179,65 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Report'}
         default: {$ref: '#/components/responses/Error'}
+  /reports/batch:
+    post:
+      operationId: assessQuestionBatch
+      description: |
+        Evaluate up to five questions in input order against one snapshot and effective date.
+        Requires evaluate scope. Omit snapshotId to use the active snapshot.
+        Reuse the returned snapshotId and asOf to continue a longer questionnaire.
+        An explicit snapshot must belong to the tenant and have been activated previously.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [questions]
+              properties:
+                questions:
+                  type: array
+                  minItems: 1
+                  maxItems: 5
+                  items: {type: string, minLength: 1, maxLength: 1000}
+                asOf: {type: string, format: date, description: Defaults to the current UTC date}
+                snapshotId: {type: string, format: uuid}
+      responses:
+        '201':
+          description: Atomic batch of completed reports with replayable report IDs
+          headers:
+            Idempotency-Replayed: {$ref: '#/components/headers/Replayed'}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshotId, asOf, status, reports]
+                properties:
+                  snapshotId: {type: string, format: uuid}
+                  asOf: {type: string, format: date}
+                  status: {const: completed}
+                  reports:
+                    type: array
+                    minItems: 1
+                    maxItems: 5
+                    items: {$ref: '#/components/schemas/Report'}
+        '404':
+          description: The explicit snapshot is unavailable to this tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code]
+                    properties:
+                      code: {const: usable_snapshot_not_found}
+        default: {$ref: '#/components/responses/Error'}
   /reports/{reportId}:
     parameters:
       - $ref: '#/components/parameters/ReportId'

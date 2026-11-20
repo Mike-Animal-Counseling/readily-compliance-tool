@@ -32,6 +32,14 @@ function citation(parent: ParentMatch, unit: EvidenceUnit, quote: string): Evide
   };
 }
 
+function quoteUnit(parent: ParentMatch, unit: EvidenceUnit): Assessment["claims"][number] {
+  const evidence = unit.table?.cells.filter(cell => cell.text.trim()).map(cell => ({
+    documentVersionId: parent.documentVersionId, parentId: parent.parentId,
+    unitId: unit.id, quote: cell.text, column: cell.column,
+  }));
+  return { statement: unit.text, evidence: evidence?.length ? evidence : [citation(parent, unit, unit.text)] };
+}
+
 async function readReferences(sql: Transaction, tenant: string, snapshot: string, asOf: string, selected: ReadParent[]) {
   const seen = new Map(selected.map(parent => [parentKey(parent), parent]));
   let unresolved = false;
@@ -67,7 +75,7 @@ async function readReferences(sql: Transaction, tenant: string, snapshot: string
 export function readAssessment(question: string, parents: ReadParent[], initialReasons: string[]): Assessment {
   const reasons = new Set(initialReasons);
   const lookup = question.match(/^(?:what does|quote|show)\s+(?:section|clause|article)\s+(\d{1,3}(?:\.\d{1,3}){0,7})(?:\s+state)?[.?!]?$/i)?.[1];
-  const exact = new Map<string, EvidenceCitation>();
+  const exact = new Map<string, Assessment["claims"][number]>();
   const exceptions = new Map<string, EvidenceCitation>();
   const excerpts = new Map<string, EvidenceCitation>();
   let batchesRead = 0;
@@ -80,7 +88,7 @@ export function readAssessment(question: string, parents: ReadParent[], initialR
         if (!unit.text.trim()) continue;
         const key = `${parentKey(parent)}/${unit.id}`;
         if (lookup && (unit.clause === lookup || unit.clause?.startsWith(lookup + "."))) {
-          exact.set(key, citation(parent, unit, unit.text));
+          exact.set(key, quoteUnit(parent, unit));
         }
         if (unit.exception && !exceptions.has(key)) {
           exceptions.set(key, citation(parent, unit, unit.text.slice(0, 240)));
@@ -93,15 +101,17 @@ export function readAssessment(question: string, parents: ReadParent[], initialR
     }
   }
   const matches = [...exact.values()];
-  const versions = new Set(matches.map(match => match.documentVersionId));
+  const versions = new Set(matches.map(match => match.evidence[0].documentVersionId));
   if (versions.size > 1) reasons.add("ambiguous_clause");
   if (exceptions.size) reasons.add("condition_requires_review");
   if (parents.length && !lookup) reasons.add("interpretation_requires_review");
-  if (matches.length > 40 || matches.reduce((length, match) => length + match.quote.length, 0) > 16000) {
+  if (matches.length > 40 ||
+      matches.reduce((length, match) => length + match.statement.length, 0) > 16000 ||
+      matches.reduce((count, match) => count + match.evidence.length, 0) > 160) {
     reasons.add("quotation_exceeds_report_limit");
   }
   if (exceptions.size > 40) reasons.add("exception_list_exceeds_report_limit");
-  const claims = reasons.size ? [] : matches.map(evidence => ({ statement: evidence.quote, evidence: [evidence] }));
+  const claims = reasons.size ? [] : matches;
   return {
     question,
     status: reasons.size ? "needs_review" : claims.length ? "supported" : "insufficient",

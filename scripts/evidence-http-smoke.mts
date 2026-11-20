@@ -123,6 +123,44 @@ try {
     await assert.rejects(client.activate(damaged.id, activeSnapshotId, "damaged"), expectedError(409, "index_validation_failed"));
     assert.equal((await client.active()).id, activeSnapshotId);
   });
+  const crowded = await newTenant();
+  const fiveClauses = synthPdf([pdfLines(Array.from({ length: 5 }, (_, i) =>
+    `Section ${i + 1}. Synthetic manifest verification.`))]);
+  const crowdedDocument = await crowded.client.upload(fiveClauses, policyFixtureMetadata, "crowded-document");
+  const crowdedSnapshot = await crowded.client.index([crowdedDocument.id], "crowded-index");
+  // Give every child an identical search score, with one parent filling the old child limit.
+  await sql`
+    update readily_v1.index_entries child set search = template.search, embedding = template.embedding
+    from readily_v1.index_entries template
+    where child.tenant_id = ${crowded.id} and child.snapshot_id = ${crowdedSnapshot.id}
+      and template.tenant_id = child.tenant_id and template.snapshot_id = child.snapshot_id and template.child_id = 'p1-c1'
+  `;
+  await sql`
+    insert into readily_v1.index_entries
+      (tenant_id, snapshot_id, document_version_id, parent_id, child_id, unit_ids, clauses, search, embedding)
+    select e.tenant_id, e.snapshot_id, e.document_version_id, e.parent_id,
+      'p1-extra-' || lpad(n::text, 3, '0'), e.unit_ids, e.clauses, e.search, e.embedding
+    from readily_v1.index_entries e cross join generate_series(1, 140) as fixture(n)
+    where e.tenant_id = ${crowded.id} and e.snapshot_id = ${crowdedSnapshot.id} and e.child_id = 'p1-c1'
+  `;
+  await sql`update readily_v1.snapshots set entry_count = entry_count + 140
+    where tenant_id = ${crowded.id} and id = ${crowdedSnapshot.id}`;
+  await crowded.client.activate(crowdedSnapshot.id, null, "crowded-activate");
+  const crowdedQuestion = "Where is synthetic manifest verification required?";
+  const resultWithCrowdedHits = await crowded.client.evaluate(crowdedQuestion, "crowded-evaluate");
+  assert.deepEqual(resultWithCrowdedHits.result.parents.map(parent => parent.parentId).sort(), ["p1", "p2", "p3", "p4", "p5"]);
+  const completeParent = await crowded.client.json<{ block: ParentBlock; hits: { childId: string }[] }>(
+    `/reports/${resultWithCrowdedHits.id}/evidence/${crowdedDocument.id}/p1`,
+  );
+  assert.equal(completeParent.block.id, "p1");
+  assert.equal(new Set(completeParent.hits.map(hit => hit.childId)).size, 141);
+  await assert.rejects(other.evaluateBatch([crowdedQuestion], "foreign-batch", { snapshotId: crowdedSnapshot.id }),
+    expectedError(404, "usable_snapshot_not_found"));
+  await assert.rejects(crowded.client.evaluateBatch([], "invalid-batch"), expectedError(400, "invalid_input"));
+  const atomicBatch = await crowded.client.evaluateBatch([crowdedQuestion, "Quote section 2"], "atomic-batch");
+  await assert.rejects(crowded.client.evaluateBatch([crowdedQuestion], "atomic-batch"), expectedError(409, "idempotency_conflict"));
+  assert.equal(atomicBatch.reports.length, 2);
+  console.log("Five distinct parents, all 141 matching child positions and snapshot-pinned batches passed");
 
   const crossPolicy = (await newTenant()).client;
   const metadata = policyFixtureMetadata;

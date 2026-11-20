@@ -134,6 +134,7 @@ export async function activateSnapshot(sql: Transaction, tenant: string, id: str
 }
 
 export async function findParents(sql: Transaction, tenant: string, snapshot: string, asOf: string, question: string, clauses: string[]) {
+  const topK = 5;
   const vector = createTextEmbedding(question);
   const terms = [...new Set(question.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])]
     .filter(term => term.length > 2 && !["the", "and", "what", "are", "does", "how", "that", "for", "with", "can"].includes(term))
@@ -148,25 +149,32 @@ export async function findParents(sql: Transaction, tenant: string, snapshot: st
       select websearch_to_tsquery('simple', ${terms.join(" OR ")}) as terms,
         ${JSON.stringify(vector)}::vector as embedding, ${sql.array(clauses)}::text[] as clauses
     ), signals as (
-      (select e.document_version_id, e.child_id, 3.0 / (60 + row_number() over (order by e.document_version_id, e.child_id)) as weight
-       from eligible e, query q where e.clauses && q.clauses order by e.document_version_id, e.child_id limit 128)
+      select e.document_version_id, e.child_id, 3.0 / (60 + row_number() over (order by e.document_version_id, e.child_id)) as weight
+      from eligible e, query q where e.clauses && q.clauses
       union all
-      (select e.document_version_id, e.child_id, 1.0 / (60 + row_number() over
+      select e.document_version_id, e.child_id, 1.0 / (60 + row_number() over
         (order by ts_rank_cd(e.search, q.terms) desc, e.document_version_id, e.child_id))
-       from eligible e, query q where e.search @@ q.terms
-       order by ts_rank_cd(e.search, q.terms) desc, e.document_version_id, e.child_id limit 128)
+      from eligible e, query q where e.search @@ q.terms
       union all
-      (select e.document_version_id, e.child_id, 1.0 / (60 + row_number() over
+      select e.document_version_id, e.child_id, 1.0 / (60 + row_number() over
         (order by e.embedding <=> q.embedding, e.document_version_id, e.child_id))
-       from eligible e, query q where (e.embedding <=> q.embedding) < 0.8
-       order by e.embedding <=> q.embedding, e.document_version_id, e.child_id limit 128)
+      from eligible e, query q where (e.embedding <=> q.embedding) < 0.8
+    ), scored as materialized (
+      select document_version_id, child_id, sum(weight)::float8 as score
+      from signals group by document_version_id, child_id
+    ), selected_parents as (
+      select e.document_version_id, e.parent_id, max(s.score) as parent_score
+      from scored s join eligible e using (document_version_id, child_id)
+      group by e.document_version_id, e.parent_id
+      order by parent_score desc, e.document_version_id, e.parent_id
+      limit ${topK}
     )
     select s.document_version_id as "documentVersionId", e.parent_id as "parentId", s.child_id as "childId",
-      e.unit_ids as "unitIds", sum(s.weight)::float8 as score
-    from signals s join eligible e using (document_version_id, child_id)
-    group by s.document_version_id, e.parent_id, s.child_id, e.unit_ids
+      e.unit_ids as "unitIds", s.score
+    from scored s join eligible e using (document_version_id, child_id)
+    join selected_parents p on p.document_version_id = e.document_version_id and p.parent_id = e.parent_id
   `;
-  return rankParents(rows, 5);
+  return rankParents(rows, topK);
 }
 
 export async function findReferencedParents(sql: Transaction, tenant: string, snapshot: string, asOf: string, clauses: string[]) {
