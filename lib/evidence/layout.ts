@@ -1,9 +1,12 @@
 import type { Page } from "pdf2json";
 import { decodePdfText, parsePdfBuffer } from "../pdf/extract-pages";
+import { parserVersion } from "./model";
 import type { EvidenceUnit, ParentBlock, ParsedPolicy, SourceBox } from "./model";
+import { ocrParserVersion, readOcrPages } from "./ocr";
 
 type Run = { x: number; y: number; text: string; box: SourceBox };
-type LayoutItem = Pick<EvidenceUnit, "text" | "boxes" | "table"> & { y: number };
+type LayoutItem = Pick<EvidenceUnit, "text" | "boxes" | "table">;
+type PageLayout = { items: LayoutItem[]; unreadable: boolean; uncertain: boolean };
 const tolerance = 0.15;
 const clausePrefix = /^(?:(?:section|clause|article)\s+|第\s*)?(\d{1,3}(?:\.\d{1,3}){0,7})(?:\s*[.):、条]\s*|\s+)(?=\D)/iu;
 const exceptionPattern = /\b(?:unless|except|exceptions?|exempt(?:ion)?|provided that|subject to|however|only if)\b|除非|例外|但书|但不|豁免/iu;
@@ -43,7 +46,7 @@ function pageLayout(page: Page, number: number) {
     return [{ x, y, text, box: rectangle(page, number, x, y - height, x + block.w / 32, y + height / 4) }];
   });
   const used = new Set<Run>();
-  const items: LayoutItem[] = [];
+  const items: (LayoutItem & { y: number })[] = [];
   const horizontal = [...page.HLines].sort((a, b) => a.y - b.y);
   let uncertain = page.Texts.some(block => block.R.some(run => run.RA));
 
@@ -90,16 +93,15 @@ function pageLayout(page: Page, number: number) {
   return { items: items.sort((a, b) => a.y - b.y), unreadable: runs.length === 0, uncertain };
 }
 
-export function structurePolicyPages(pages: Page[]): ParsedPolicy {
+function structurePolicyLayouts(pages: PageLayout[]): ParsedPolicy {
   const parents: ParentBlock[] = [];
   const warnings: ParsedPolicy["warnings"] = [];
   let parent: ParentBlock | undefined;
   let root: string | null = null;
   let clause: string | null = null;
   let previousTable: { id: string; header: string; row: number; page: number } | undefined;
-  for (const [index, page] of pages.entries()) {
+  for (const [index, layout] of pages.entries()) {
     const number = index + 1;
-    const layout = pageLayout(page, number);
     if (layout.unreadable) warnings.push({ page: number, code: "unreadable_page" });
     if (layout.uncertain) warnings.push({ page: number, code: "uncertain_layout" });
     let continuation: { source: string; target: string; offset: number } | undefined;
@@ -142,6 +144,21 @@ export function structurePolicyPages(pages: Page[]): ParsedPolicy {
 }
 
 export async function parsePolicy(data: Uint8Array) {
+  const started = Date.now();
   const parsed = await parsePdfBuffer(data);
-  return structurePolicyPages(parsed.Pages);
+  const pages: PageLayout[] = parsed.Pages.map((page, index) => pageLayout(page, index + 1));
+  let usedOcr = false;
+  if (pages.some(page => page.unreadable)) {
+    // Leave database transaction time for writing results after the PDF work.
+    const ocr = await readOcrPages(data, pages.length, Math.min(10000, 16000 - (Date.now() - started)));
+    ocr?.forEach((items, index) => {
+      if (!pages[index].unreadable || !items.length) return;
+      pages[index] = { items, unreadable: false, uncertain: true };
+      usedOcr = true;
+    });
+  }
+  return {
+    ...structurePolicyLayouts(pages),
+    parserVersion: usedOcr ? `${parserVersion}+${ocrParserVersion}` : parserVersion,
+  };
 }

@@ -4,7 +4,22 @@ The existing workspace uses its session-based upload and assessment endpoints. T
 
 ## Evidence and limits
 
-The layout worker retains numbered clauses, nested text, ruled table rows and cells, repeated headers on contiguous pages, page-relative coordinates and the original PDF checksum. Complex page layouts and pages without text go to review. The worker uses pdf2json with the existing 10-second, 128 MiB and two-worker limits. Docling's document model supports reading order, table structure and provenance. A separate Docling/OCR worker still needs runtime and corpus validation. [Docling document model](https://docling-project.github.io/docling/concepts/docling_document/)
+The layout worker retains numbered clauses, nested text, ruled table rows and cells, repeated headers on contiguous pages, page-relative coordinates and the original PDF checksum. The pdf2json worker has a 10-second deadline, a 128 MiB heap cap and two slots. Complex layouts go to review.
+
+### Same-host OCR
+
+The optional Docling worker adds English text, table rows and page locations for pages without a text layer. The app preserves its native extraction on other pages, stores the original PDF and records the combined parser version. OCR pages are marked for review. If the local worker is unavailable or produces invalid evidence, unreadable pages retain their review warning.
+
+Prepare the model weights in a dedicated environment before accepting documents.
+
+```sh
+python -m pip install -r workers/ocr/requirements.txt
+python workers/ocr/serve.py --prepare-models
+```
+
+Start `python workers/ocr/serve.py` under a supervisor with a 2 GiB memory limit and two CPU threads. Set the same `READILY_V1_OCR_PORT` and independent random `READILY_V1_OCR_TOKEN` in the app and worker. Keep both on the same host and reuse the prepared model cache. The worker binds to loopback, handles one document at a time and uses offline inference. The app waits at most 10 seconds for OCR within a combined 16-second parsing window. Representative scans still need private validation before rollout. [Docling document model](https://docling-project.github.io/docling/concepts/docling_document/)
+
+### Retrieval and assessment
 
 Search combines clause-number matches, PostgreSQL text ranking and cosine distance over local, versioned 128-dimensional embeddings using reciprocal rank fusion. It scores matching children within the bounded snapshot and selects up to five distinct parents by their highest child score. Each selected parent retains all its matching child positions. The reader processes each parent in order, carrying table headers across batches and following uniquely resolved clause references. General interpretations, unresolved references and potentially material conditions go to review. Direct unambiguous clause lookups can produce exact quotations. Automated v1 assessment uses local processing. The existing workspace's OpenRouter data flow is documented in the [workspace security guide](PRODUCTION_SECURITY.md).
 
