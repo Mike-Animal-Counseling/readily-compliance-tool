@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { createTextEmbedding } from "../rag/embeddings";
 import { parsePolicy } from "./layout";
-import { embeddingVersion, indexVersion, makeChildren, parserVersion } from "./model";
-import type { ParentBlock, ParsedPolicy } from "./model";
+import { embeddingVersion, indexVersion, makeChildren } from "./model";
+import type { ParentBlock } from "./model";
 import { parentKey, rankParents } from "./parents";
 import type { ChildHit, ParentMatch } from "./parents";
 
@@ -26,7 +26,7 @@ type Upload = {
 export async function createDocument(sql: Transaction, tenant: string, upload: Upload) {
   const [{ count }] = await sql`select count(*)::int as count from readily_v1.document_versions where tenant_id = ${tenant}`;
   if (count >= 100) throw new EvidenceError(409, "document_quota");
-  let parsed: ParsedPolicy;
+  let parsed: Awaited<ReturnType<typeof parsePolicy>>;
   try {
     parsed = await parsePolicy(upload.bytes);
   } catch (error) {
@@ -34,6 +34,7 @@ export async function createDocument(sql: Transaction, tenant: string, upload: U
     throw new EvidenceError(422, "invalid_pdf");
   }
   const id = randomUUID();
+  const { parserVersion } = parsed;
   const sha256 = createHash("sha256").update(upload.bytes).digest("hex");
   const status = parsed.warnings.length ? "needs_review" : "ready";
   const size = parsed.parents.reduce((total, block) => total + Buffer.byteLength(JSON.stringify(block)), 0);

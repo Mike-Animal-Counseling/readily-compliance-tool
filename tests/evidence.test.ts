@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { readAssessment } from "../lib/evidence/assessment";
 import { evidenceDb } from "../lib/evidence/connection";
@@ -63,6 +67,61 @@ test("bounded PDF worker preserves nested clauses, cross-page table rows and sou
 test("scan without a text layer is flagged", async () => {
   const parsed = await parsePolicy(synthPdf([pdfLines(["Section 1. Readable"]), "1 w 40 40 m 60 60 l S"]));
   assert.deepEqual(parsed.warnings, [{ page: 2, code: "unreadable_page" }]);
+});
+
+test("same-host OCR fills only unreadable pages and preserves review and cell locations", async () => {
+  const env = process.env;
+  const previous = { READILY_V1_OCR_PORT: env.READILY_V1_OCR_PORT, READILY_V1_OCR_TOKEN: env.READILY_V1_OCR_TOKEN };
+  const token = randomBytes(32).toString("base64url");
+  const fixture = synthPdf([pdfLines(["Section 1. Native clause"]), "1 w 40 40 m 60 60 l S"]);
+  let pdfReceived = Buffer.alloc(0);
+  const box = { page: 2, left: 0.1, top: 0.2, right: 0.5, bottom: 0.3 };
+  const pages = [[{ text: "Alternate text for readable page", boxes: [{ ...box, page: 1 }] }], [
+    { text: "Section 2. Scanned policy", boxes: [box] },
+    {
+      text: "Unless waived | 20 days", boxes: [box],
+      table: { id: "ocr-t1", row: 1, header: false, cells: [{ column: 2, text: "20 days", box }] },
+    },
+  ]];
+  const server = createServer((request, response) => {
+    if (request.url !== "/parse" || request.headers.authorization !== `Bearer ${token}`) {
+      response.writeHead(401).end();
+      return;
+    }
+    const chunks: Buffer[] = [];
+    request.on("data", chunk => chunks.push(chunk));
+    request.on("end", () => {
+      pdfReceived = Buffer.concat(chunks);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ version: "docling-2.151.1-layout-v1", pages }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  env.READILY_V1_OCR_PORT = String((server.address() as AddressInfo).port);
+  env.READILY_V1_OCR_TOKEN = token;
+  try {
+    const result = await parsePolicy(fixture);
+    assert.deepEqual(pdfReceived, fixture);
+    assert.match(result.parserVersion, /docling/);
+    assert.deepEqual(result.warnings, [{ page: 2, code: "uncertain_layout" }]);
+    const units = result.parents.flatMap(parent => parent.units);
+    assert.ok(units.some(unit => unit.text.includes("Native clause")));
+    assert.ok(units.every(unit => !unit.text.includes("Alternate text")));
+    assert.equal(units.find(unit => unit.table)?.exception, true);
+    assert.deepEqual(units.find(unit => unit.table)?.table?.cells[0], { column: 2, text: "20 days", box });
+
+    box.page = 1;
+    const invalid = await parsePolicy(fixture);
+    assert.equal(invalid.parserVersion, "pdf2json-layout-v1");
+    assert.deepEqual(invalid.warnings, [{ page: 2, code: "unreadable_page" }]);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete env[key];
+      else env[key] = value;
+    }
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });
 
 test("exact table quotations cite each nonempty cell at its own column", async () => {

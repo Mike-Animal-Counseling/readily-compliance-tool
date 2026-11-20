@@ -1,0 +1,6 @@
+docling-slim[format-pdf,models-local,feat-ocr-rapidocr,convert-core]==2.151.1
+docling-core==2.107.1
+docling-parse==7.27.0
+docling-ibm-models==4.0.4
+rapidocr==3.10.0
+onnxruntime==1.32.0
