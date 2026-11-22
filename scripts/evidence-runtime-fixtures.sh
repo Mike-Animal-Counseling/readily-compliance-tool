@@ -44,3 +44,7 @@ NODE_EXTRA_CA_CERTS="$scratch/server.crt" \
   READILY_V1_TEST_DATABASE_URL="postgresql://readily_test:readily_test@localhost:$postgres_port/readily_v1_test?sslmode=verify-full" \
   READILY_V1_TEST_REDIS_URL="rediss://default:$cache_password@localhost:$cache_port" \
   npm run test:evidence:http
+
+NODE_ENV=production NODE_EXTRA_CA_CERTS="$scratch/server.crt" \
+  READILY_V1_TEST_DATABASE_URL="postgresql://readily_test:readily_test@localhost:$postgres_port/readily_v1_test?sslmode=verify-full" \
+  npm run test:evidence:rerank

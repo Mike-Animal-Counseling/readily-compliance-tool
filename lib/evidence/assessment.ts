@@ -1,9 +1,11 @@
-import { clauseReferences } from "./layout";
 import type { EvidenceUnit } from "./model";
 import { parentBatches, parentKey } from "./parents";
 import type { ParentMatch, ReadParent } from "./parents";
-import { findParents, findReferencedParents, readParents } from "./repository";
+import { findReferencedParents, readParents } from "./repository";
 import type { Transaction } from "./repository";
+import { retrieveAssessmentParents } from "./retrieval";
+import type { Retrieval } from "./retrieval";
+import type { scoreLocalReranker } from "./reranker";
 
 export type EvidenceCitation = {
   documentVersionId: string;
@@ -22,6 +24,7 @@ export type Assessment = {
   excerpts: EvidenceCitation[];
   exceptions: EvidenceCitation[];
   batchesRead: number;
+  retrieval?: Retrieval;
 };
 
 function citation(parent: ParentMatch, unit: EvidenceUnit, quote: string): EvidenceCitation {
@@ -124,8 +127,11 @@ export function readAssessment(question: string, parents: ReadParent[], initialR
   };
 }
 
-export async function assess(sql: Transaction, tenant: string, snapshot: string, asOf: string, question: string): Promise<Assessment> {
-  const matches = await findParents(sql, tenant, snapshot, asOf, question, clauseReferences(question));
+export async function assess(
+  sql: Transaction, tenant: string, snapshot: string, asOf: string, question: string,
+  allowRerank = true, score?: typeof scoreLocalReranker,
+): Promise<Assessment> {
+  const { matches, retrieval } = await retrieveAssessmentParents(sql, tenant, snapshot, asOf, question, allowRerank, score);
   const selected = await readParents(sql, tenant, matches);
   const { parents, unresolved } = await readReferences(sql, tenant, snapshot, asOf, selected);
   const [unreadable] = await sql`
@@ -139,5 +145,5 @@ export async function assess(sql: Transaction, tenant: string, snapshot: string,
   if (unreadable) reasons.push("unverified_pdf_layout");
   if (unresolved) reasons.push("unresolved_clause_reference");
   if (selected.length !== matches.length) reasons.push("missing_parent");
-  return readAssessment(question, parents, reasons);
+  return { ...readAssessment(question, parents, reasons), retrieval };
 }
