@@ -49,11 +49,11 @@ test("local reranker authenticates, sends child text only and aligns scores by i
     req.on("end", () => {
       received = { method: req.method, url: req.url, authorization: req.headers.authorization, body: JSON.parse(body) };
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ results: [{ index: 1, relevance_score: 0.9 }, { index: 0, relevance_score: 0.1 }] }));
+      res.end(JSON.stringify({ results: [{ index: 1, relevance_score: 5.5 }, { index: 0, relevance_score: -10.2 }] }));
     });
   });
   assert.equal(isLocalRerankerConfigured(), true);
-  assert.deepEqual(await scoreLocalReranker(question, passages), { scores: [0.1, 0.9], version });
+  assert.deepEqual(await scoreLocalReranker(question, passages), { scores: [-10.2, 5.5], version });
   assert.deepEqual(received, {
     method: "POST", url: "/rerank", authorization: `Bearer ${token}`,
     body: { model: version, query: question, documents: passages.map(passage => passage.text), top_n: 2 },
@@ -67,6 +67,7 @@ test("local reranker falls back for invalid config, oversized input, redirects a
     { status: 503, body: "unavailable" },
     { status: 200, body: JSON.stringify({ results: [{ index: 0, relevance_score: 0.1 }, { index: 0, relevance_score: 0.9 }] }) },
     { status: 200, body: JSON.stringify({ results: [{ index: 0, relevance_score: 0.1 }, { index: 2, relevance_score: 0.9 }] }) },
+    { status: 200, body: '{"results":[{"index":0,"relevance_score":1e309},{"index":1,"relevance_score":0}]}' },
     { status: 200, body: " ".repeat(16 * 1024 + 1) },
   ];
   const { version } = await mockReranker(t, (_req, res) => {

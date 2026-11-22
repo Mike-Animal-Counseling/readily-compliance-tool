@@ -11,7 +11,7 @@ const maxResponseBytes = 16 * 1024;
 const payload = z.object({
   results: z.array(z.object({
     index: z.number().int().min(0).max(maxPassages - 1),
-    relevance_score: z.number().min(0).max(1),
+    relevance_score: z.number(),
   })).max(maxPassages),
 });
 

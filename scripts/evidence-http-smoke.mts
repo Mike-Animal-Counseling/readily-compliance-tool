@@ -142,6 +142,20 @@ try {
   if (!reviews.migrated) {
     await sql.unsafe(await readFile(join("db", "migrations", "002_review_answers.sql"), "utf8"));
   }
+  const [passages] = await sql`select exists (select 1 from information_schema.columns
+    where table_schema = 'readily_v1' and table_name = 'index_entries' and column_name = 'rerank_text') as migrated`;
+  if (!passages.migrated) {
+    await ready();
+    const legacy = await newTenant();
+    const pdf = synthPdf([pdfLines(["Section 1. Verify the synthetic manifest.", "Section 2. Keep the synthetic manifest."])]);
+    const doc = await legacy.client.upload(pdf, policyFixtureMetadata, "legacy-doc");
+    const index = await legacy.client.index([doc.id], "legacy-index");
+    await legacy.client.activate(index.id, null, "legacy-active");
+    const report = await legacy.client.evaluate("Where is the synthetic manifest verified?", "legacy-report");
+    assert.equal(report.result.parents.length, 2);
+    assert.deepEqual(report.result.retrieval, { method: "rrf", fallback: "missing_passages" });
+    console.log("Indexing and assessment passed before the reranking schema migration");
+  }
   await sql.unsafe(await readFile(join("db", "migrations", "003_rerank_passages.sql"), "utf8"));
   await ready();
   if (redis) await checkProductionWorkspace();
