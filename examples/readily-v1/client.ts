@@ -20,6 +20,8 @@ export type Report = {
     excerpts: Citation[];
     exceptions: Citation[];
     batchesRead: number;
+    retrieval?: { method: "rrf"; fallback?: "missing_passages" | "model_unavailable" }
+      | { method: "cross_encoder"; model: string };
   };
 };
 export type BatchReport = {

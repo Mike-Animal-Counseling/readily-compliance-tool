@@ -23,6 +23,14 @@ type Upload = {
   effectiveUntil?: string;
 };
 
+async function hasRerankPassages(sql: Transaction): Promise<boolean> {
+  const [schema] = await sql`
+    select exists (select 1 from pg_catalog.pg_attribute
+      where attrelid = 'readily_v1.index_entries'::regclass and attname = 'rerank_text' and not attisdropped) as ready
+  `;
+  return schema.ready;
+}
+
 export async function createDocument(sql: Transaction, tenant: string, upload: Upload) {
   const [{ count }] = await sql`select count(*)::int as count from readily_v1.document_versions where tenant_id = ${tenant}`;
   if (count >= 100) throw new EvidenceError(409, "document_quota");
@@ -88,6 +96,7 @@ export async function buildSnapshot(sql: Transaction, tenant: string, documentVe
   const entries = parents.flatMap(({ document_version_id, block }) => makeChildren(block)
     .map(child => ({ document_version_id, ...child })));
   if (!entries.length || entries.length > 10000) throw new EvidenceError(422, "index_size_limit");
+  const withPassages = await hasRerankPassages(sql);
   const id = randomUUID();
   await sql`insert into readily_v1.snapshots
     (tenant_id, id, embedding_version, index_version, entry_count)
@@ -107,8 +116,10 @@ export async function buildSnapshot(sql: Transaction, tenant: string, documentVe
     }));
     await sql`
       insert into readily_v1.index_entries
-        (tenant_id, snapshot_id, document_version_id, parent_id, child_id, unit_ids, clauses, search, embedding)
-      select ${tenant}::uuid, ${id}::uuid, version::uuid, parent, child, units, clauses, to_tsvector('simple', body), embedding::vector
+        (tenant_id, snapshot_id, document_version_id, parent_id, child_id, unit_ids, clauses, search, embedding
+          ${withPassages ? sql`, rerank_text` : sql``})
+      select ${tenant}::uuid, ${id}::uuid, version::uuid, parent, child, units, clauses,
+        to_tsvector('simple', body), embedding::vector ${withPassages ? sql`, left(body, 1200)` : sql``}
       from jsonb_to_recordset(${sql.json(rows)})
         as item(version text, parent text, child text, units text[], clauses text[], body text, embedding text)
     `;
@@ -134,15 +145,15 @@ export async function activateSnapshot(sql: Transaction, tenant: string, id: str
   return { id, previousSnapshotId: expected, status: "active" };
 }
 
-export async function findParents(sql: Transaction, tenant: string, snapshot: string, asOf: string, question: string, clauses: string[]) {
-  const topK = 5;
+export async function findParents(sql: Transaction, tenant: string, snapshot: string, asOf: string, question: string, clauses: string[], topK = 5) {
   const vector = createTextEmbedding(question);
   const terms = [...new Set(question.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])]
     .filter(term => term.length > 2 && !["the", "and", "what", "are", "does", "how", "that", "for", "with", "can"].includes(term))
     .slice(0, 40);
   const rows = await sql<ChildHit[]>`
     with eligible as materialized (
-      select i.* from readily_v1.index_entries i
+      select i.document_version_id, i.parent_id, i.child_id, i.unit_ids, i.clauses, i.search, i.embedding
+      from readily_v1.index_entries i
       join readily_v1.document_versions d on d.tenant_id = i.tenant_id and d.id = i.document_version_id
       where i.tenant_id = ${tenant} and i.snapshot_id = ${snapshot}
         and daterange(d.effective_from, d.effective_until) @> ${asOf}::date
@@ -176,6 +187,20 @@ export async function findParents(sql: Transaction, tenant: string, snapshot: st
     join selected_parents p on p.document_version_id = e.document_version_id and p.parent_id = e.parent_id
   `;
   return rankParents(rows, topK);
+}
+
+export async function readRerankPassages(sql: Transaction, tenant: string, snapshot: string, matches: ParentMatch[]) {
+  if (!await hasRerankPassages(sql)) return [];
+  const requested = matches.map(match => ({
+    version: match.documentVersionId, parent: match.parentId, child: match.hits[0].childId,
+  }));
+  return await sql<{ documentVersionId: string; parentId: string; text: string }[]>`
+    select e.document_version_id as "documentVersionId", e.parent_id as "parentId", e.rerank_text as text
+    from readily_v1.index_entries e join jsonb_to_recordset(${sql.json(requested)})
+      as r(version uuid, parent text, child text)
+      on e.document_version_id = r.version and e.parent_id = r.parent and e.child_id = r.child
+    where e.tenant_id = ${tenant} and e.snapshot_id = ${snapshot} and e.rerank_text is not null
+  `;
 }
 
 export async function findReferencedParents(sql: Transaction, tenant: string, snapshot: string, asOf: string, clauses: string[]) {

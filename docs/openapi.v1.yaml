@@ -472,7 +472,9 @@ components:
       properties:
         documentVersionId: {type: string, format: uuid}
         parentId: {type: string}
-        score: {type: number}
+        score:
+          type: number
+          description: Hybrid retrieval score of the best child. The result array uses the recorded retrieval method for ordering.
         hits: {type: array, items: {$ref: '#/components/schemas/ChildHit'}}
     Report:
       type: object
@@ -501,6 +503,19 @@ components:
             excerpts: {type: array, items: {$ref: '#/components/schemas/Citation'}}
             exceptions: {type: array, items: {$ref: '#/components/schemas/Citation'}}
             batchesRead: {type: integer, minimum: 0}
+            retrieval:
+              description: Retrieval method and model version when recorded. Older reports may omit this field.
+              oneOf:
+                - type: object
+                  required: [method]
+                  properties:
+                    method: {const: rrf}
+                    fallback: {enum: [missing_passages, model_unavailable]}
+                - type: object
+                  required: [method, model]
+                  properties:
+                    method: {const: cross_encoder}
+                    model: {type: string}
     Review:
       type: object
       required: [reportId, revision, reviewer, state, notes, answerOverride, createdAt]

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -29,6 +30,32 @@ const sql = postgres(database, { max: 1, connect_timeout: 5, onnotice: () => {} 
 const origin = "http://127.0.0.1:3011";
 const appOrigin = redis ? origin.replace(/^http:/, "https:") : origin;
 const accessCode = randomBytes(32).toString("hex");
+const rerankToken = randomBytes(32).toString("hex");
+const crowdedQuestion = "Where is synthetic manifest verification required?";
+let rerankCalls = 0;
+let rerankAvailable = true;
+const reranker = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request as AsyncIterable<Buffer>) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  if (request.url !== "/rerank" || request.headers.authorization !== `Bearer ${rerankToken}` ||
+      body.query !== crowdedQuestion || !rerankAvailable) {
+    response.writeHead(503).end();
+    return;
+  }
+  rerankCalls++;
+  assert.equal(body.top_n, 7);
+  assert.equal(body.documents.length, 7);
+  assert.ok(body.documents.every((text: string) => text.includes("Synthetic manifest verification")));
+  response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+    results: body.documents.map((text: string, index: number) => ({
+      index, relevance_score: text.includes("Section 7.") ? 0.99 : 0.25,
+    })),
+  }));
+});
+await new Promise<void>((resolve, reject) => reranker.once("error", reject).listen(0, "127.0.0.1", resolve));
+const rerankAddress = reranker.address();
+assert.ok(rerankAddress && typeof rerankAddress === "object");
 const tenantIds: string[] = [];
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const runFile = promisify(execFile);
@@ -48,7 +75,9 @@ async function newTenant(scopes = ["read", "ingest", "evaluate", "review", "inde
 const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", redis ? "start" : "dev", "-p", "3011", "-H", "127.0.0.1"], {
   env: { ...process.env, NODE_ENV: redis ? "production" : "development", APP_ORIGIN: appOrigin, REDIS_URL: redis ?? "",
     DEMO_ACCESS_CODE: accessCode, SESSION_SECRET: randomBytes(32).toString("hex"),
-    OPENROUTER_API_KEY: "", READILY_V1_ENABLED: "true", READILY_V1_DATABASE_URL: database },
+    OPENROUTER_API_KEY: "", READILY_V1_ENABLED: "true", READILY_V1_DATABASE_URL: database,
+    READILY_V1_RERANK_PORT: String(rerankAddress.port), READILY_V1_RERANK_TOKEN: rerankToken,
+    READILY_V1_RERANK_MODEL: "synthetic-reranker@1" },
   stdio: ["ignore", "pipe", "pipe"],
   detached: process.platform !== "win32",
   windowsHide: true,
@@ -106,10 +135,28 @@ async function checkProductionWorkspace() {
 try {
   const [schema] = await sql`select to_regclass('readily_v1.reviews') is not null as migrated`;
   if (!schema.migrated) {
-    for (const name of ["001_versioned_evidence.sql", "002_review_answers.sql"]) {
-      await sql.unsafe(await readFile(join("db", "migrations", name), "utf8"));
-    }
+    await sql.unsafe(await readFile(join("db", "migrations", "001_versioned_evidence.sql"), "utf8"));
   }
+  const [reviews] = await sql`select exists (select 1 from information_schema.columns
+    where table_schema = 'readily_v1' and table_name = 'reviews' and column_name = 'answer_override') as migrated`;
+  if (!reviews.migrated) {
+    await sql.unsafe(await readFile(join("db", "migrations", "002_review_answers.sql"), "utf8"));
+  }
+  const [passages] = await sql`select exists (select 1 from information_schema.columns
+    where table_schema = 'readily_v1' and table_name = 'index_entries' and column_name = 'rerank_text') as migrated`;
+  if (!passages.migrated) {
+    await ready();
+    const legacy = await newTenant();
+    const pdf = synthPdf([pdfLines(["Section 1. Verify the synthetic manifest.", "Section 2. Keep the synthetic manifest."])]);
+    const doc = await legacy.client.upload(pdf, policyFixtureMetadata, "legacy-doc");
+    const index = await legacy.client.index([doc.id], "legacy-index");
+    await legacy.client.activate(index.id, null, "legacy-active");
+    const report = await legacy.client.evaluate("Where is the synthetic manifest verified?", "legacy-report");
+    assert.equal(report.result.parents.length, 2);
+    assert.deepEqual(report.result.retrieval, { method: "rrf", fallback: "missing_passages" });
+    console.log("Indexing and assessment passed before the reranking schema migration");
+  }
+  await sql.unsafe(await readFile(join("db", "migrations", "003_rerank_passages.sql"), "utf8"));
   await ready();
   if (redis) await checkProductionWorkspace();
   const { client } = await newTenant();
@@ -124,9 +171,9 @@ try {
     assert.equal((await client.active()).id, activeSnapshotId);
   });
   const crowded = await newTenant();
-  const fiveClauses = synthPdf([pdfLines(Array.from({ length: 5 }, (_, i) =>
+  const crowdedClauses = synthPdf([pdfLines(Array.from({ length: 7 }, (_, i) =>
     `Section ${i + 1}. Synthetic manifest verification.`))]);
-  const crowdedDocument = await crowded.client.upload(fiveClauses, policyFixtureMetadata, "crowded-document");
+  const crowdedDocument = await crowded.client.upload(crowdedClauses, policyFixtureMetadata, "crowded-document");
   const crowdedSnapshot = await crowded.client.index([crowdedDocument.id], "crowded-index");
   // Give every child an identical search score, with one parent filling the old child limit.
   await sql`
@@ -146,9 +193,9 @@ try {
   await sql`update readily_v1.snapshots set entry_count = entry_count + 140
     where tenant_id = ${crowded.id} and id = ${crowdedSnapshot.id}`;
   await crowded.client.activate(crowdedSnapshot.id, null, "crowded-activate");
-  const crowdedQuestion = "Where is synthetic manifest verification required?";
   const resultWithCrowdedHits = await crowded.client.evaluate(crowdedQuestion, "crowded-evaluate");
-  assert.deepEqual(resultWithCrowdedHits.result.parents.map(parent => parent.parentId).sort(), ["p1", "p2", "p3", "p4", "p5"]);
+  assert.deepEqual(resultWithCrowdedHits.result.retrieval, { method: "cross_encoder", model: "synthetic-reranker@1" });
+  assert.deepEqual(resultWithCrowdedHits.result.parents.map(parent => parent.parentId), ["p7", "p1", "p2", "p3", "p4"]);
   const completeParent = await crowded.client.json<{ block: ParentBlock; hits: { childId: string }[] }>(
     `/reports/${resultWithCrowdedHits.id}/evidence/${crowdedDocument.id}/p1`,
   );
@@ -160,7 +207,22 @@ try {
   const atomicBatch = await crowded.client.evaluateBatch([crowdedQuestion, "Quote section 2"], "atomic-batch");
   await assert.rejects(crowded.client.evaluateBatch([crowdedQuestion], "atomic-batch"), expectedError(409, "idempotency_conflict"));
   assert.equal(atomicBatch.reports.length, 2);
-  console.log("Five distinct parents, all 141 matching child positions and snapshot-pinned batches passed");
+  assert.equal(atomicBatch.reports[1].result.retrieval?.method, "rrf");
+  assert.equal(atomicBatch.reports[1].result.parents[0].parentId, "p2");
+  assert.equal(rerankCalls, 2);
+  rerankAvailable = false;
+  const offline = await crowded.client.evaluate(crowdedQuestion, "crowded-offline");
+  assert.deepEqual(offline.result.retrieval, { method: "rrf", fallback: "model_unavailable" });
+  assert.deepEqual(offline.result.parents.map(parent => parent.parentId), ["p1", "p2", "p3", "p4", "p5"]);
+  rerankAvailable = true;
+  await sql`update readily_v1.index_entries set rerank_text = null
+    where tenant_id = ${crowded.id} and snapshot_id = ${crowdedSnapshot.id}`;
+  const oldSnapshot = await crowded.client.evaluate(crowdedQuestion, "crowded-old-snapshot");
+  assert.deepEqual(oldSnapshot.result.retrieval, { method: "rrf", fallback: "missing_passages" });
+  assert.deepEqual(oldSnapshot.result.parents, offline.result.parents);
+  assert.deepEqual(await crowded.client.evaluate(crowdedQuestion, "crowded-evaluate"), resultWithCrowdedHits);
+  assert.equal(rerankCalls, 2);
+  console.log("Reranking, five distinct parents, 141 child positions, exact clauses, replay and both fallbacks passed");
 
   const crossPolicy = (await newTenant()).client;
   const metadata = policyFixtureMetadata;
@@ -235,6 +297,7 @@ try {
       console.log("Synthetic tenant data retention cleanup passed");
     }
   } finally {
+    reranker.close();
     await sql.end({ timeout: 5 });
     if (child.exitCode === null && child.pid) {
       if (process.platform === "win32") {

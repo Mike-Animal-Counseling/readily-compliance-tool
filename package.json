@@ -12,6 +12,7 @@
     "test:http": "node scripts/http-security-smoke.mjs",
     "test:evidence:http": "tsx scripts/evidence-http-smoke.mts",
     "test:evidence:canary": "tsx scripts/evidence-live-smoke.mts",
+    "test:evidence:rerank": "tsx scripts/evidence-rerank-benchmark.mts",
     "typecheck": "node node_modules/typescript-7/bin/tsc --noEmit"
   },
   "dependencies": {
