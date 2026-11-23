@@ -2,6 +2,7 @@ import { ReviewStateSelect } from "@/components/review-state-select";
 import { useState } from "react";
 import type {
   AuditQuestion,
+  AuditAnswer,
   EvaluationResult,
   ReviewState,
 } from "@/types/compliance";
@@ -15,9 +16,20 @@ type ResultCardProps = {
   isRerunning: boolean;
 };
 
-const badgeClasses: Record<EvaluationResult["answer"], string> = {
+const badgeClasses: Record<AuditAnswer | "insufficient" | "failed" | "stale", string> = {
   Yes: "bg-emerald-100 text-emerald-800",
   No: "bg-rose-100 text-rose-800",
+  insufficient: "bg-amber-100 text-amber-800",
+  failed: "bg-slate-100 text-slate-700",
+  stale: "bg-amber-100 text-amber-800",
+};
+
+const badgeLabels: Record<keyof typeof badgeClasses, string> = {
+  Yes: "Yes",
+  No: "No",
+  insufficient: "Insufficient evidence",
+  failed: "Evaluation failed",
+  stale: "Question edited",
 };
 
 export function ResultCard({
@@ -30,6 +42,8 @@ export function ResultCard({
 }: ResultCardProps) {
   const [showFullChunk, setShowFullChunk] = useState(false);
   const [showRetrievedChunks, setShowRetrievedChunks] = useState(false);
+  const isStale = result.questionText !== question.text;
+  const resultBadge = isStale ? "stale" : result.status === "evaluated" ? result.answer : result.status;
 
   return (
     <article className="rounded-[24px] border border-border bg-white/92 p-5 shadow-sm">
@@ -40,13 +54,15 @@ export function ResultCard({
               Question {question.order}
             </span>
             <span
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${badgeClasses[result.answer]}`}
+              className={`rounded-full px-3 py-1 text-xs font-semibold ${badgeClasses[resultBadge]}`}
             >
-              {result.answer}
+              {badgeLabels[resultBadge]}
             </span>
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-              Confidence: {result.confidence}
-            </span>
+            {!isStale && result.status === "evaluated" && (
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                Confidence: {result.confidence}
+              </span>
+            )}
           </div>
           <textarea
             className="min-h-24 w-full rounded-2xl border border-border bg-[#fcfbf8] px-4 py-3 text-sm leading-6 text-foreground outline-none transition focus:border-accent"
@@ -55,12 +71,12 @@ export function ResultCard({
           />
         </div>
         <div className="flex flex-col gap-3">
-          <ReviewStateSelect
-            value={result.reviewState}
-            onChange={(nextValue) =>
-              onReviewStateChange(result.questionId, nextValue)
-            }
-          />
+          {!isStale && result.status === "evaluated" && (
+            <ReviewStateSelect
+              value={result.reviewState}
+              onChange={(nextValue) => onReviewStateChange(result.questionId, nextValue)}
+            />
+          )}
           <button
             className="rounded-xl bg-foreground px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={isRerunning}
@@ -72,6 +88,9 @@ export function ResultCard({
         </div>
       </div>
 
+      {isStale ? (
+        <p className="mt-4 text-sm text-muted">Re-run the question to evaluate the updated wording.</p>
+      ) : (
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
         <div className="rounded-2xl bg-[#f9f6ef] p-4">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">
@@ -89,7 +108,7 @@ export function ResultCard({
                   : "Evidence summary"}
             </p>
             <p className="mt-2 text-sm leading-6 text-foreground">
-              {result.evidence || "No evidence supported."}
+              {result.evidence || "No source quote verified."}
             </p>
             {result.evidenceChunkText ? (
               <div className="mt-3">
@@ -182,6 +201,7 @@ export function ResultCard({
           ) : null}
         </div>
       </div>
+      )}
     </article>
   );
 }

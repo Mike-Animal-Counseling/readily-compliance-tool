@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ResultCard } from "@/components/result-card";
 import { StepCard } from "@/components/step-card";
+import { unresolvedEvaluation } from "@/lib/review-result";
 import type {
   AuditQuestion,
   ExtractAuditJobStartResponse,
@@ -92,6 +93,19 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function replaceResult(current: EvaluationResult[], next: EvaluationResult) {
+  const existing = current.find((result) => result.questionId === next.questionId);
+  if (!existing) return [...current, next];
+  const preserveReview = existing.status === "evaluated" && next.status === "evaluated" &&
+    existing.questionText === next.questionText && existing.answer === next.answer &&
+    existing.reason === next.reason && existing.confidence === next.confidence &&
+    existing.evidence === next.evidence && existing.sourceFile === next.sourceFile &&
+    existing.sourcePage === next.sourcePage && existing.sourceType === next.sourceType &&
+    existing.evidenceChunkText === next.evidenceChunkText;
+  const replacement: EvaluationResult = preserveReview ? { ...next, reviewState: existing.reviewState } : next;
+  return current.map((result) => result.questionId === next.questionId ? replacement : result);
+}
+
 function escapeCsvValue(value: string | number) {
   const raw = String(value ?? "");
   const text = /^[\s]*[=+@\-\t\r]/.test(raw) ? "\'" + raw : raw;
@@ -163,6 +177,9 @@ export function ComplianceReviewApp() {
   const resultsByQuestionId = useMemo(
     () => new Map(results.map((result) => [result.questionId, result])),
     [results],
+  );
+  const exportableQuestions = questions.filter(
+    (question) => resultsByQuestionId.get(question.id)?.questionText === question.text,
   );
 
   const selectedPolicyCount = selectedDocumentIds.length;
@@ -434,44 +451,9 @@ export function ComplianceReviewApp() {
             },
           );
 
-          setResults((current) => {
-            const existing = current.find(
-              (result) => result.questionId === question.id,
-            );
-            const nextResult = {
-              ...payload.result,
-              reviewState: existing?.reviewState ?? payload.result.reviewState,
-            };
-
-            return current.some((result) => result.questionId === question.id)
-              ? current.map((result) =>
-                  result.questionId === question.id ? nextResult : result,
-                )
-              : [...current, nextResult];
-          });
+          setResults((current) => replaceResult(current, payload.result));
         } catch {
-          setResults((current) => {
-            const fallbackResult: EvaluationResult = {
-              questionId: question.id,
-              questionText: question.text,
-              answer: "No",
-              reason: "No evidence supported.",
-              evidence: "",
-              confidence: "Low",
-              evidenceChunkText: "",
-              retrievedChunks: [],
-              sourceFile: "",
-              sourcePage: 0,
-              sourceType: null,
-              reviewState: "pending",
-            };
-
-            return current.some((result) => result.questionId === question.id)
-              ? current.map((result) =>
-                  result.questionId === question.id ? fallbackResult : result,
-                )
-              : [...current, fallbackResult];
-          });
+          setResults((current) => replaceResult(current, unresolvedEvaluation(question, "failed")));
         } finally {
           setReviewProgress((current) => ({
             ...current,
@@ -517,20 +499,9 @@ export function ComplianceReviewApp() {
         },
       );
 
-      setResults((current) => {
-        const existing = current.find((result) => result.questionId === questionId);
-        const nextResult = {
-          ...payload.result,
-          reviewState: existing?.reviewState ?? payload.result.reviewState,
-        };
-
-        return current.some((result) => result.questionId === questionId)
-          ? current.map((result) =>
-              result.questionId === questionId ? nextResult : result,
-            )
-          : [...current, nextResult];
-      });
+      setResults((current) => replaceResult(current, payload.result));
     } catch (error) {
+      setResults((current) => replaceResult(current, unresolvedEvaluation(question, "failed")));
       setErrorMessage(
         error instanceof Error ? error.message : "Failed to re-run the question.",
       );
@@ -548,19 +519,14 @@ export function ComplianceReviewApp() {
         question.id === questionId ? { ...question, text: nextText } : question,
       ),
     );
-    setResults((current) =>
-      current.map((result) =>
-        result.questionId === questionId
-          ? { ...result, questionText: nextText }
-          : result,
-      ),
-    );
   }
 
   function updateReviewState(questionId: string, reviewState: ReviewState) {
+    const question = questions.find((candidate) => candidate.id === questionId);
     setResults((current) =>
       current.map((result) =>
-        result.questionId === questionId ? { ...result, reviewState } : result,
+        result.questionId === questionId && result.status === "evaluated" &&
+          result.questionText === question?.text ? { ...result, reviewState } : result,
       ),
     );
   }
@@ -604,7 +570,7 @@ export function ComplianceReviewApp() {
   }
 
   function exportResultsToCsv() {
-    if (results.length === 0) {
+    if (exportableQuestions.length === 0) {
       return;
     }
 
@@ -620,22 +586,22 @@ export function ComplianceReviewApp() {
         "Source File",
         "Source Page",
         "Source Type",
+        "Evaluation Status",
       ],
-      ...questions
-        .filter((question) => resultsByQuestionId.has(question.id))
-        .map((question) => {
+      ...exportableQuestions.map((question) => {
           const result = resultsByQuestionId.get(question.id)!;
           return [
             question.order,
             question.text,
-            result.answer,
-            result.confidence,
+            result.answer ?? "",
+            result.confidence ?? "",
             result.reviewState,
             result.reason,
             result.evidence,
             result.sourceFile,
-            result.sourcePage,
+            result.sourcePage || "",
             result.sourceType ?? "",
+            result.status,
           ];
         }),
     ];
@@ -1297,12 +1263,12 @@ export function ComplianceReviewApp() {
                 <div>
                   <p className="text-lg font-semibold">Results ready for analyst review</p>
                   <p className="mt-2 text-sm text-slate-200">
-                    Update review state inline and export the current result set at
-                    any time.
+                    Update review state inline. Re-run edited questions to include them in the export.
                   </p>
                 </div>
                 <button
-                  className="rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-foreground transition hover:bg-slate-100"
+                  className="rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-foreground transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={exportableQuestions.length === 0}
                   onClick={exportResultsToCsv}
                   type="button"
                 >

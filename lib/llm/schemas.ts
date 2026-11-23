@@ -43,7 +43,7 @@ export const extractAuditQuestionsSchema = z.object({
 });
 
 export const evaluationModelResponseSchema = z.object({
-  answer: z.enum(auditAnswers),
+  answer: z.enum(auditAnswers).nullable(),
   reason: z.string().max(20000),
   confidence: z.enum(confidenceLevels),
   citation: z
@@ -71,12 +71,13 @@ export const evaluateOneRequestSchema = z.object({
 export const evaluationResultSchema = z.object({
   questionId: z.string().max(20000),
   questionText: z.string().max(20000),
-  answer: z.enum(auditAnswers),
   reason: z.string().max(20000),
   evidence: z.string().max(20000),
-  confidence: z.enum(confidenceLevels),
   sourceFile: z.string().max(20000),
   sourcePage: z.number().int().nonnegative(),
   sourceType: z.enum(policySourceTypes).nullable(),
-  reviewState: z.enum(reviewStates),
-});
+}).and(z.discriminatedUnion("status", [
+  z.object({ status: z.literal("evaluated"), answer: z.enum(auditAnswers), confidence: z.enum(confidenceLevels), reviewState: z.enum(reviewStates) }),
+  z.object({ status: z.literal("insufficient"), answer: z.null(), confidence: z.null(), reviewState: z.literal("needs_review") }),
+  z.object({ status: z.literal("failed"), answer: z.null(), confidence: z.null(), reviewState: z.literal("pending") }),
+]));

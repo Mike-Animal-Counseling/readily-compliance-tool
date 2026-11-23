@@ -55,20 +55,23 @@ export interface PolicyDocumentRecord {
   sourceType: PolicySourceType;
 }
 
-export interface EvaluationResult {
+interface EvaluationResultDetails {
   questionId: string;
   questionText: string;
-  answer: AuditAnswer;
   reason: string;
   evidence: string;
-  confidence: ConfidenceLevel;
   evidenceChunkText: string;
   retrievedChunks: RetrievedEvidenceChunk[];
   sourceFile: string;
   sourcePage: number;
   sourceType: PolicySourceType | null;
-  reviewState: ReviewState;
 }
+
+export type EvaluationResult = EvaluationResultDetails & (
+  | { status: "evaluated"; answer: AuditAnswer; confidence: ConfidenceLevel; reviewState: ReviewState }
+  | { status: "insufficient"; answer: null; confidence: null; reviewState: "needs_review" }
+  | { status: "failed"; answer: null; confidence: null; reviewState: "pending" }
+);
 
 export interface ExtractAuditResponse {
   auditFileName: string;

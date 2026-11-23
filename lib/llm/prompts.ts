@@ -115,7 +115,7 @@ Your task is to determine whether the retrieved policy evidence FULLY satisfies 
 
 Return strict JSON only:
 {
-  "answer": "Yes" | "No",
+  "answer": "Yes" | "No" | null,
   "reason": "brief explanation",
   "confidence": "High" | "Low",
   "citation": {
@@ -164,9 +164,9 @@ Evidence:
 
 Correct answer:
 {
-  "answer": "No",
+  "answer": null,
   "reason": "The policy provides an out-of-network exception workflow but does not explicitly establish the default restriction to in-network providers.",
-  "confidence": "High",
+  "confidence": "Low",
   "citation": null
 }
 
@@ -191,7 +191,7 @@ Correct answer:
   "confidence": "High",
   "citation": {
     "chunkId": "example",
-    "snippet": "health plan remains responsible..."
+    "snippet": "The health plan remains responsible for covered services unrelated to the service episode while the member is receiving the covered service."
   }
 }
 
@@ -200,7 +200,7 @@ Ongoing responsibility, coordination, or payment obligations can substantively p
 
 --------------------------------
 FEW-SHOT EXAMPLE 3
-PARTIAL SUPPORT = NO
+PARTIAL SUPPORT = INSUFFICIENT EVIDENCE
 --------------------------------
 
 Question:
@@ -211,14 +211,14 @@ Evidence:
 
 Correct answer:
 {
-  "answer": "No",
+  "answer": null,
   "reason": "The agreement requirement is supported, but the provider documentation obligation is missing.",
-  "confidence": "High",
+  "confidence": "Low",
   "citation": null
 }
 
 Rule:
-If any required component is missing, the answer must be No.
+When a required component is missing, return null and explain what evidence is missing.
 
 --------------------------------
 STEP 1 - DECOMPOSE REQUIREMENT
@@ -273,7 +273,7 @@ BOTH must be independently supported.
 Hard rules:
 - exception does NOT prove default
 - default does NOT prove exception
-- if either side is missing -> No
+- if either side is missing -> null
 
 --------------------------------
 STEP 4 - LEGAL / REGULATORY ATTRIBUTION
@@ -293,7 +293,7 @@ Hard rules:
 - operational workflows do NOT prove statutory attribution
 - descriptive text does NOT prove "law requires"
 
-If legal attribution is missing -> No
+If legal attribution is missing -> null
 
 --------------------------------
 STEP 5 - ANTI-HALLUCINATION CHECK
@@ -307,7 +307,7 @@ Before finalizing Yes, verify:
 4) Did I fill gaps using outside knowledge?
 5) Did I combine unrelated chunks to invent a rule?
 
-If YES to any -> final answer must be No
+If YES to any -> return null
 
 --------------------------------
 STEP 6 - FINAL OUTPUT RULES
@@ -325,6 +325,11 @@ For Yes:
 - use a short exact snippet from the evidence
 
 For No:
+- use only direct evidence that contradicts a required condition
+- cite a short exact quote from the chunk that establishes the contradiction
+
+For null:
+- use this when the evidence is missing, partial, ambiguous or inconclusive
 - citation must be null
 
 Never invent chunk IDs, quotes, file names, or page numbers.

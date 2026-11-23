@@ -5,8 +5,9 @@ import { getDataset } from "@/lib/data/dataset-store";
 import { searchPreloadedPolicyChunks } from "@/lib/db/preloaded-policy-store";
 import { evaluateReviewRequestSchema } from "@/lib/llm/schemas";
 import { evaluateQuestionWithChunks } from "@/lib/rag/evaluation";
+import { unresolvedEvaluation } from "@/lib/review-result";
 import type { VectorizedPolicyChunk } from "@/lib/rag/vector-store";
-import type { AuditQuestion, EvaluateResponse } from "@/types/compliance";
+import type { EvaluateResponse } from "@/types/compliance";
 
 export const runtime = "nodejs";
 
@@ -47,23 +48,6 @@ async function mapWithConcurrency<TInput, TOutput>(
   const workerCount = Math.min(concurrency, items.length);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
-}
-
-function buildEvaluationErrorResult(question: AuditQuestion) {
-  return {
-    questionId: question.id,
-    questionText: question.text,
-    answer: "No" as const,
-    reason: "No evidence supported.",
-    evidence: "",
-    confidence: "Low" as const,
-    evidenceChunkText: "",
-    retrievedChunks: [],
-    sourceFile: "",
-    sourcePage: 0,
-    sourceType: null,
-    reviewState: "pending" as const,
-  };
 }
 
 async function handlePOST(request: Request) {
@@ -122,23 +106,6 @@ async function handlePOST(request: Request) {
             : [];
           const combinedChunks = [...defaultLibraryChunks, ...uploadedChunks];
 
-          if (combinedChunks.length === 0) {
-            return {
-              questionId: question.id,
-              questionText: question.text,
-              answer: "No" as const,
-              reason: "No evidence supported.",
-              evidence: "",
-              confidence: "Low" as const,
-              evidenceChunkText: "",
-              retrievedChunks: [],
-              sourceFile: "",
-              sourcePage: 0,
-              sourceType: null,
-              reviewState: "pending" as const,
-            };
-          }
-
           return await evaluateQuestionWithChunks({
             question,
             chunks: combinedChunks,
@@ -150,7 +117,7 @@ async function handlePOST(request: Request) {
               "Request could not be completed.",
           });
 
-          return buildEvaluationErrorResult(question);
+          return unresolvedEvaluation(question, "failed");
         }
       },
     );

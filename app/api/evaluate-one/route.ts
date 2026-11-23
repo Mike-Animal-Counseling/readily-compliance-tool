@@ -53,25 +53,6 @@ async function handlePOST(request: Request) {
       : [];
     const combinedChunks = [...defaultLibraryChunks, ...uploadedChunks];
 
-    if (combinedChunks.length === 0) {
-      return NextResponse.json({
-        result: {
-          questionId: parsedBody.question.id,
-          questionText: parsedBody.question.text,
-          answer: "No",
-          reason: "No evidence supported.",
-          evidence: "",
-          confidence: "Low",
-          evidenceChunkText: "",
-          retrievedChunks: [],
-          sourceFile: "",
-          sourcePage: 0,
-          sourceType: null,
-          reviewState: "pending",
-        },
-      } satisfies EvaluateOneResponse);
-    }
-
     const result = await evaluateQuestionWithChunks({
       question: parsedBody.question,
       chunks: combinedChunks,
